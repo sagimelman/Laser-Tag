@@ -1,31 +1,23 @@
-from abc import ABC, abstractmethod
-
-class NetworkEntity(ABC):
-    def __init__(self, device_type : str, device_name : str, ip_address : str, port: int, connected : bool):
-        self.device_type = device_type
+class NetworkEntity:
+    def __init__(self, entity_type: str, device_name: str, ip_address: str, port: int, connected: bool):
+        self.entity_type = entity_type
         self.device_name = device_name
         self.ip_address = ip_address
         self.port = port
-        self.connected = False
+        self.connected = connected
 
-    @abstractmethod
-    def connect(self):
-        raise NotImplementedError("Subclasses must implement this method")
+    # Manually enforce abstract methods by raising NotImplementedError with method name
+    def accept_connections(self):
+        raise NotImplementedError(f"Subclasses must implement the 'accept_connections' method.")
 
-    @abstractmethod
-    def disconnect(self): # disconnect from the network
-        self.connected = False
-        print(f"{self.device_name} disconnected.")
-    
-    @abstractmethod
-    def send_message(self, message : str): # send a message to the network
-        raise NotImplementedError("Subclasses must implement this method")
-    
-    @abstractmethod
-    def receive_message(self):
-        """Receive a message (to be implemented by subclasses)."""
-        raise NotImplementedError("Subclasses must implement this method")
-    
+    def handle_client(self, client_socket):
+        raise NotImplementedError(f"Subclasses must implement the 'handle_client' method.")
 
-    def __str__(self): # print the network entity
-        return f"[ {self.device_name} / {self.device_type}] IP: {self.ip_address}, Port: {self.port}, Connected: {self.connected}"
+    def send_message(self, client_socket, message):
+        raise NotImplementedError(f"Subclasses must implement the 'send_message' method.")
+
+    def broadcast_message(self, message):
+        raise NotImplementedError(f"Subclasses must implement the 'broadcast_message' method.")
+
+    def disconnect_client(self, client_socket):
+        raise NotImplementedError(f"Subclasses must implement the 'disconnect_client' method.")

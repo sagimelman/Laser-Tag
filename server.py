@@ -3,20 +3,31 @@ import socket
 import threading
 
 class Server(NetworkEntity):
-    def __init__(self, device_name: str, ip_address: str, port: int, connected: bool):
-        super().__init__("Server", device_name, ip_address, port, connected)
+    def __init__(self, device_name: str, ip_address: str, port: int):
+        # Pass 'False' for the 'connected' argument
+        super().__init__("Server", device_name, ip_address, port, connected=False)
         self.clients = []  # List to store connected player clients
         self.server_socket = None
 
-    def accept_connections(self):
-        """Start accepting connections from player clients."""
-        # Create the server socket
+    def connect(self):
+        """Method to connect the server to the network (optional in this case)."""
         self.server_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         self.server_socket.bind((self.ip_address, self.port))
         self.server_socket.listen(5)  # Maximum of 5 players in this example
-
+        self.connected = True
         print(f"Server listening on {self.ip_address}:{self.port}...")
 
+    def disconnect(self):
+        """Disconnect the server (stop listening and close the socket)."""
+        self.connected = False
+        if self.server_socket:
+            self.server_socket.close()
+        print(f"Server {self.device_name} disconnected.")
+    
+    def accept_connections(self):
+        """Start accepting connections from player clients."""
+        self.connect()  # Connect to the network (bind the socket and listen)
+        
         while True:
             try:
                 client_socket, client_address = self.server_socket.accept()
@@ -35,29 +46,45 @@ class Server(NetworkEntity):
 
     def handle_client(self, client_socket):
         """Handle communication with an individual client."""
+        client_address = client_socket.getpeername()  # Get client's (IP, port)
+        print(f"New client connected: {client_address[0]}:{client_address[1]}")
+
         try:
             while True:
-                message = client_socket.recv(1024)  # Receive a message from the client
-                if not message:
+                message = self.receive_message(client_socket)  # Use the receive function
+                if message is None:
                     break  # Client disconnected
 
-                # Process the received message here (for example, relay it to the configurator client)
-                print(f"Received message: {message.decode('utf-8')}")
+                print(f"Received from {client_address[0]}:{client_address[1]} -> {message}")
 
-                # TODO: Relay the message to the configurator client or broadcast to other players
+                # Optionally, send a response back (Example: Echoing the message)
+                self.send_message(client_socket, f"Server received: {message}")
 
         except Exception as e:
-            print(f"Error handling client: {e}")
+            print(f"Error handling client {client_address[0]}:{client_address[1]} - {e}")
         finally:
-            # Clean up the client connection when done
             self.disconnect_client(client_socket)
+
+    def receive_message(self, client_socket):
+        """Receive a message from a client and return it."""
+        try:
+            message = client_socket.recv(1024).decode("utf-8")
+            if not message:
+                print(f"Client {client_socket.getpeername()[0]}:{client_socket.getpeername()[1]} disconnected.")
+                self.disconnect_client(client_socket)
+                return None  # Client disconnected
+            return message
+        except Exception as e:
+            print(f"Error receiving message: {e}")
+            return None
 
     def send_message(self, client_socket, message):
         """Send a message to a specific client."""
         try:
             client_socket.send(message.encode("utf-8"))
+            print(f"Sent to {client_socket.getpeername()[0]}:{client_socket.getpeername()[1]} -> {message}")
         except Exception as e:
-            print(f"Error sending message to client: {e}")
+            print(f"Error sending message to {client_socket.getpeername()[0]}:{client_socket.getpeername()[1]} - {e}")
 
     def broadcast_message(self, message):
         """Broadcast a message to all connected clients."""
@@ -72,7 +99,13 @@ class Server(NetworkEntity):
         try:
             client_socket.close()
             self.clients.remove(client_socket)
-            print("Client disconnected.")
+            print(f"Client {client_socket.getpeername()[0]}:{client_socket.getpeername()[1]} disconnected.")
         except Exception as e:
             print(f"Error disconnecting client: {e}")
 
+def main():
+    serverSock = Server("Main Server", "192.168.56.1", 52525)
+    serverSock.accept_connections()
+
+if __name__ == "__main__":
+    main()
