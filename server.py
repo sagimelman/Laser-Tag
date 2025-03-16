@@ -11,8 +11,6 @@ class Server(NetworkEntity):
 
     def accept_connections(self):
         """Start accepting connections from player clients."""
-        if not self.connected:  # Simulate abstract method check
-            raise NotImplementedError("Subclasses must implement this accept_connections method.")
 
         # Create the server socket
         self.server_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -31,7 +29,7 @@ class Server(NetworkEntity):
 
                 # Start a new thread to handle this client's communication
                 client_thread = threading.Thread(target=self.handle_client, args=(client_socket,))
-                client_thread.daemon = True
+                client_thread.daemon = True #will be killed if the main thread is killed
                 client_thread.start()
 
             except Exception as e:
@@ -40,7 +38,7 @@ class Server(NetworkEntity):
     def handle_client(self, client_socket):
         """Handle communication with an individual client."""
         if not self.connected:  # Simulate abstract method check
-            raise NotImplementedError("Subclasses must implement this handle_client method.")
+            raise new Exception("You are not connected!")
         
         try:
             while True:
@@ -61,8 +59,8 @@ class Server(NetworkEntity):
 
     def send_message(self, client_socket, message):
         """Send a message to a specific client."""
-        if not self.connected:  # Simulate abstract method check
-            raise NotImplementedError("Subclasses must implement this send_message method.")
+        if not self.connected:  
+            raise new Exception("You are not connected!")
         
         try:
             client_socket.send(message.encode("utf-8"))
@@ -71,8 +69,8 @@ class Server(NetworkEntity):
 
     def broadcast_message(self, message):
         """Broadcast a message to all connected clients."""
-        if not self.connected:  # Simulate abstract method check
-            raise NotImplementedError("Subclasses must implement this broadcast_message method.")
+        if not self.connected:  
+            raise new Exception("You are not connected!")
         
         for client_socket in self.clients:
             try:
@@ -83,7 +81,7 @@ class Server(NetworkEntity):
     def disconnect_client(self, client_socket):
         """Disconnect a client and remove them from the client list."""
         if not self.connected:  # Simulate abstract method check
-            raise NotImplementedError("Subclasses must implement this disconnect_client method.")
+            raise new Exception("You are not connected!")
         
         try:
             client_socket.close()
