@@ -1,7 +1,6 @@
-from abc import ABC, abstractmethod
 from machine import Pin
 
-class Component(ABC):
+class Component:
     def __init__(self, pin: int, mode=None):
         """
         Base component class for all connected components.
@@ -12,22 +11,23 @@ class Component(ABC):
         """
         self.pin = Pin(pin, mode) if mode is not None else None  # Assign pin only if mode is provided
 
-    @abstractmethod
+        # Check if abstract methods are implemented in the child class
+        if type(self) is Component:
+            raise TypeError("Can't instantiate abstract class 'Component' directly")
+
     def enable(self):
-        """Enable the component (make in child!)."""
-        pass
+        raise NotImplementedError("Subclasses must implement enable()")
 
-    @abstractmethod
     def disable(self):
-        """Disable the component (make in child!)."""
-        pass
+        raise NotImplementedError("Subclasses must implement disable()")
 
-    @abstractmethod
     def write(self, value):
-        """Write data to the component (make in child!)."""
-        pass
+        raise NotImplementedError("Subclasses must implement write()")
 
-    @abstractmethod
     def read(self):
-        """Read data from the component (make in child!)."""
-        pass
+        raise NotImplementedError("Subclasses must implement read()")
+
+
+
+
+
