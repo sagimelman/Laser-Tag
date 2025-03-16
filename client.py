@@ -7,6 +7,8 @@ class Client(NetworkEntity):
         self.socket = None
         self.type = None  # Will be overridden by subclasses
         self.connected = connected  # Track the connection status
+        if type(self) is Client:
+            raise TypeError("Can't instantiate abstract class 'Client' directly")
 
     def connect(self):
         """Subclasses must implement this connect method."""
