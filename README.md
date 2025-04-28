@@ -12,3 +12,5 @@ On the other side of the communication, there are two types of clients:
 2. Configurator - The "boss" of each playing room. He decides the length of the game, he can freeze the game, etc. He can(optionally) seperate the game into teams.
 
 I will need to solder all parts together, but currently I am just beginning.
+
+I am using 330 ohm resistors for the IR receivers
