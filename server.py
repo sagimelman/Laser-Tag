@@ -1,6 +1,8 @@
 import socket
 import threading
 from NetworkEntity import NetworkEntity
+from game import Game
+import json
 
 # Manual abstract Server class
 class Server(NetworkEntity):
