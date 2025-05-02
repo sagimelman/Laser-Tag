@@ -16,7 +16,48 @@ class Server(NetworkEntity):
         self.game = Game()
         self.next_player_id = 1
         self.running = False
-        
+    def setup_gui(self, gui):
+    """Set up GUI for the server"""
+    self.gui = gui
+    
+    # Connect GUI buttons to server actions
+    self.gui.start_button.config(command=self.start_game)
+    self.gui.end_button.config(command=self.end_game)
+    
+    # Start GUI update thread
+    gui_thread = threading.Thread(target=self.update_gui_loop)
+    gui_thread.daemon = True
+    gui_thread.start()
+
+def update_gui_loop(self):
+    """Continuously update the GUI"""
+    while self.running:
+        if hasattr(self, 'game'):
+            game_state = self.game.get_game_state()
+            
+            # Update game status
+            self.gui.update_game_status(game_state["state"])
+            
+            # Update player list and info
+            player_info = []
+            for player_id, player_state in game_state["players"].items():
+                player_info.append({
+                    "id": player_id,
+                    "name": player_state["name"],
+                    "health": player_state["health"],
+                    "score": player_state["score"],
+                    "status": "Alive" if player_state["is_alive"] else "Dead",
+                })
+            
+            self.gui.update_player_list(player_info)
+            
+            # Update timer if game is active
+            if game_state["state"] == "ACTIVE" and game_state["time_remaining"] is not None:
+                minutes = game_state["time_remaining"] // 60
+                seconds = game_state["time_remaining"] % 60
+                self.gui.update_timer(f"{minutes:02d}:{seconds:02d}")
+            else:
+
     def start(self):
         """Start the server and wait for connections"""
         # Initialize server socket
