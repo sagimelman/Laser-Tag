@@ -56,7 +56,7 @@ def update_gui_loop(self):
                 minutes = game_state["time_remaining"] // 60
                 seconds = game_state["time_remaining"] % 60
                 self.gui.update_timer(f"{minutes:02d}:{seconds:02d}")
-            else:
+            
 
     def start(self):
         """Start the server and wait for connections"""
