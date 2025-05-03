@@ -2,7 +2,7 @@ import socket
 import threading
 import json
 import time
-from network_entity import NetworkEntity
+from networkEntity import NetworkEntity
 from game import Game
 
 class Server(NetworkEntity):
