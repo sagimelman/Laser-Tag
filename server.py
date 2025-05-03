@@ -17,17 +17,17 @@ class Server(NetworkEntity):
         self.next_player_id = 1
         self.running = False
     def setup_gui(self, gui):
-    """Set up GUI for the server"""
-    self.gui = gui
-    
-    # Connect GUI buttons to server actions
-    self.gui.start_button.config(command=self.start_game)
-    self.gui.end_button.config(command=self.end_game)
-    
-    # Start GUI update thread
-    gui_thread = threading.Thread(target=self.update_gui_loop)
-    gui_thread.daemon = True
-    gui_thread.start()
+        """Set up GUI for the server"""
+        self.gui = gui
+        
+        # Connect GUI buttons to server actions
+        self.gui.start_button.config(command=self.start_game)
+        self.gui.end_button.config(command=self.end_game)
+        
+        # Start GUI update thread
+        gui_thread = threading.Thread(target=self.update_gui_loop)
+        gui_thread.daemon = True
+        gui_thread.start()
 
 def update_gui_loop(self):
     """Continuously update the GUI"""
