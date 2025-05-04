@@ -2,312 +2,322 @@ import socket
 import threading
 import json
 import time
-from networkEntity import NetworkEntity
-from game import Game
+from NetworkEntity import NetworkEntity
 
-class Server(NetworkEntity):
+class LaserTagServer(NetworkEntity):
     def __init__(self, host='0.0.0.0', port=9999):
-        super().__init__()
-        self.host = host
-        self.port = port
+        """
+        Initialize a simplified Laser Tag Server that just handles button presses.
+        
+        Args:
+            host: Host address to bind to (default: all interfaces)
+            port: Port number to bind to (default: 9999)
+        """
+        # Initialize with NetworkEntity parameters
+        super().__init__(
+            entity_type="server",
+            device_name="LaserTagServer",
+            ip_address=host,
+            port=port,
+            connected=False
+        )
+        
+        # Server properties
         self.server_socket = None
-        self.clients = {}  # Maps client_id to (socket, address) tuple
-        self.client_lock = threading.Lock()
-        self.game = Game()
-        self.next_player_id = 1
         self.running = False
-    def setup_gui(self, gui):
-        """Set up GUI for the server"""
-        self.gui = gui
+        self.clients = {}  # Dict of {client_id: (socket, address, player_name)}
+        self.client_threads = {}  # Dict of {client_id: thread_object}
+        self.next_client_id = 1
         
-        # Connect GUI buttons to server actions
-        self.gui.start_button.config(command=self.start_game)
-        self.gui.end_button.config(command=self.end_game)
-        
-        # Start GUI update thread
-        gui_thread = threading.Thread(target=self.update_gui_loop)
-        gui_thread.daemon = True
-        gui_thread.start()
-
-def update_gui_loop(self):
-    """Continuously update the GUI"""
-    while self.running:
-        if hasattr(self, 'game'):
-            game_state = self.game.get_game_state()
-            
-            # Update game status
-            self.gui.update_game_status(game_state["state"])
-            
-            # Update player list and info
-            player_info = []
-            for player_id, player_state in game_state["players"].items():
-                player_info.append({
-                    "id": player_id,
-                    "name": player_state["name"],
-                    "health": player_state["health"],
-                    "score": player_state["score"],
-                    "status": "Alive" if player_state["is_alive"] else "Dead",
-                })
-            
-            self.gui.update_player_list(player_info)
-            
-            # Update timer if game is active
-            if game_state["state"] == "ACTIVE" and game_state["time_remaining"] is not None:
-                minutes = game_state["time_remaining"] // 60
-                seconds = game_state["time_remaining"] % 60
-                self.gui.update_timer(f"{minutes:02d}:{seconds:02d}")
-            
-
+        # Lock for thread safety
+        self.lock = threading.Lock()
+    
     def start(self):
-        """Start the server and wait for connections"""
-        # Initialize server socket
-        self.server_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        self.server_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-        self.server_socket.bind((self.host, self.port))
-        self.server_socket.listen(5)
-        self.server_socket.settimeout(0.1)  # Short timeout for non-blocking operation
-        
-        print(f"Server started on {self.host}:{self.port}")
-        self.running = True
-        
-        # Start game update thread
-        game_thread = threading.Thread(target=self.game_loop)
-        game_thread.daemon = True
-        game_thread.start()
-        
-        # Main server loop - accept connections
+        """Start the server and begin accepting connections."""
         try:
+            # Create server socket
+            self.server_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            self.server_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            self.server_socket.bind((self.ip_address, self.port))
+            self.server_socket.listen(5)
+            self.connected = True
+            self.running = True
+            
+            print(f"Server started on {self.ip_address}:{self.port}")
+            
+            # Begin accepting connections
+            self.accept_connections()
+            
+        except Exception as e:
+            print(f"Error starting server: {e}")
+            self.shutdown()
+    
+    def accept_connections(self):
+        """Accept incoming client connections."""
+        print("Waiting for client connections...")
+        self.server_socket.settimeout(1.0)  # 1 second timeout for checking self.running
+        
+        while self.running:
+            try:
+                client_socket, client_address = self.server_socket.accept()
+                # Create a new thread to handle this client
+                client_id = self.next_client_id
+                self.next_client_id += 1
+                
+                print(f"New connection from {client_address}, assigned ID: {client_id}")
+                
+                # Store client info (socket, address, no name yet)
+                with self.lock:
+                    self.clients[client_id] = (client_socket, client_address, None)
+                
+                # Start client handler thread
+                client_thread = threading.Thread(
+                    target=self.handle_client,
+                    args=(client_socket, client_id)
+                )
+                client_thread.daemon = True
+                client_thread.start()
+                
+                with self.lock:
+                    self.client_threads[client_id] = client_thread
+                    
+            except socket.timeout:
+                # This is expected due to the socket timeout
+                continue
+            except Exception as e:
+                if self.running:  # Only print if we didn't initiate shutdown
+                    print(f"Error accepting connection: {e}")
+    
+    def handle_client(self, client_socket, client_id):
+        """
+        Handle communication with a connected client.
+        
+        Args:
+            client_socket: Socket connected to the client
+            client_id: ID assigned to this client
+        """
+        try:
+            # Set a timeout for receiving data
+            client_socket.settimeout(0.5)
+            
+            buffer = b''
+            last_active_time = time.time()
+            
             while self.running:
                 try:
-                    client_socket, addr = self.server_socket.accept()
-                    # Assign client id and start handler thread
-                    client_id = self.next_player_id
-                    self.next_player_id += 1
+                    # Try to receive data
+                    data = client_socket.recv(1024)
                     
-                    with self.client_lock:
-                        self.clients[client_id] = (client_socket, addr)
+                    # If no data, client probably disconnected
+                    if not data:
+                        print(f"Empty data received from client {client_id}, assuming disconnected")
+                        break
                     
-                    client_thread = threading.Thread(
-                        target=self.handle_client,
-                        args=(client_socket, client_id)
-                    )
-                    client_thread.daemon = True
-                    client_thread.start()
+                    # Client is active
+                    last_active_time = time.time()
                     
-                    print(f"New connection from {addr}. Assigned ID: {client_id}")
+                    # Add to buffer and process complete messages
+                    buffer += data
+                    
+                    # Process complete lines (messages end with newline)
+                    lines = buffer.split(b'\n')
+                    
+                    # Keep the last incomplete line in the buffer
+                    buffer = lines.pop(-1) if not data.endswith(b'\n') else b''
+                    
+                    # Process complete messages
+                    for line in lines:
+                        if line:  # Skip empty lines
+                            try:
+                                print(f"Processing line: {line}")
+                                message = json.loads(line.decode('utf-8'))
+                                self.process_message(message, client_id)
+                            except json.JSONDecodeError as e:
+                                print(f"JSON decode error from client {client_id}: {e}, data: {line}")
+                    
                 except socket.timeout:
-                    # No new connections, just continue
-                    pass
+                    # This is expected due to the socket timeout
+                    # Check if client has been inactive for too long (30 seconds)
+                    if time.time() - last_active_time > 30:
+                        print(f"Client {client_id} inactive for 30 seconds, checking connection")
+                        # Send a ping message to check if client is still there
+                        try:
+                            ping_msg = {"type": "ping"}
+                            self.send_message(client_socket, ping_msg)
+                            last_active_time = time.time()  # Reset the timer
+                        except Exception:
+                            print(f"Failed to send ping to client {client_id}, assuming disconnected")
+                            break
+                    continue
+                except ConnectionResetError:
+                    print(f"Connection reset by client {client_id}")
+                    break
                 except Exception as e:
-                    print(f"Error accepting connection: {e}")
-                    
-                time.sleep(0.01)  # Small delay to prevent 100% CPU usage
-        except KeyboardInterrupt:
-            print("Server shutting down...")
+                    print(f"Error handling client {client_id}: {e}")
+                    break
         finally:
-            self.stop()
+            # Client disconnected or error occurred
+            self.disconnect_client(client_socket, client_id)
     
-    def stop(self):
-        """Stop the server and close all connections"""
+    def process_message(self, message, client_id):
+        """
+        Process a message received from a client.
+        
+        Args:
+            message: The parsed JSON message
+            client_id: ID of the client that sent the message
+        """
+        msg_type = message.get("type")
+        
+        print(f"Received message from client {client_id}: {message}")
+        
+        if msg_type == "register":
+            # Player is registering with the server
+            player_name = message.get("player_name", f"Player{client_id}")
+            
+            # Update client info with player name
+            with self.lock:
+                socket_obj, address, _ = self.clients[client_id]
+                self.clients[client_id] = (socket_obj, address, player_name)
+            
+            print(f"Client {client_id} registered as {player_name}")
+            
+            # Send welcome message with assigned ID
+            welcome_msg = {
+                "type": "welcome",
+                "player_id": client_id,
+                "player_name": player_name
+            }
+            success = self.send_message(self.clients[client_id][0], welcome_msg)
+            print(f"Welcome message {'sent successfully' if success else 'FAILED to send'}")
+            
+            # Send an additional acknowledgment message
+            ack_msg = {
+                "type": "ack",
+                "message": "Registration successful"
+            }
+            self.send_message(self.clients[client_id][0], ack_msg)
+            
+        elif msg_type == "heartbeat":
+            # Client heartbeat - send an acknowledgment
+            print(f"Heartbeat from client {client_id}")
+            
+            # Send back an acknowledgment for heartbeats
+            with self.lock:
+                if client_id in self.clients:
+                    ack_msg = {
+                        "type": "heartbeat_ack",
+                        "timestamp": time.time()
+                    }
+                    self.send_message(self.clients[client_id][0], ack_msg)
+            
+        elif msg_type == "button_press":
+            # Button press notification
+            button_pin = message.get("button_pin")
+            player_name = message.get("player_name", f"Player{client_id}")
+            
+            print(f"BUTTON PRESS on pin {button_pin} from player {player_name} (ID: {client_id})!")
+            
+            # Send acknowledgment back to the client
+            with self.lock:
+                if client_id in self.clients:
+                    button_ack = {
+                        "type": "button_ack",
+                        "button_pin": button_pin,
+                        "received": True
+                    }
+                    self.send_message(self.clients[client_id][0], button_ack)
+            
+            # You could broadcast this to all clients if needed
+            # self.broadcast_message({
+            #     "type": "player_action",
+            #     "player_id": client_id,
+            #     "player_name": player_name,
+            #     "action": "button_press",
+            #     "button_pin": button_pin
+            # })
+    
+    def send_message(self, client_socket, message):
+        """
+        Send a message to a specific client.
+        
+        Args:
+            client_socket: Socket to send to
+            message: Message to send (will be converted to JSON)
+        """
+        try:
+            json_data = json.dumps(message).encode('utf-8') + b'\n'
+            client_socket.send(json_data)
+            return True
+        except Exception as e:
+            print(f"Error sending message: {e}")
+            return False
+    
+    def broadcast_message(self, message):
+        """
+        Send a message to all connected clients.
+        
+        Args:
+            message: Message to broadcast (will be converted to JSON)
+        """
+        with self.lock:
+            for client_id, (client_socket, _, _) in list(self.clients.items()):
+                self.send_message(client_socket, message)
+    
+    def disconnect_client(self, client_socket, client_id=None):
+        """
+        Disconnect a client and clean up resources.
+        
+        Args:
+            client_socket: Socket to disconnect
+            client_id: ID of client to disconnect (if known)
+        """
+        try:
+            # Try to close the socket
+            client_socket.close()
+        except:
+            pass
+        
+        # If we have the client ID, remove from lists
+        if client_id:
+            with self.lock:
+                if client_id in self.clients:
+                    player_name = self.clients[client_id][2] or f"Player{client_id}"
+                    print(f"Client {client_id} ({player_name}) disconnected")
+                    del self.clients[client_id]
+                if client_id in self.client_threads:
+                    del self.client_threads[client_id]
+    
+    def shutdown(self):
+        """Shut down the server and clean up resources."""
         self.running = False
         
         # Close all client connections
-        with self.client_lock:
-            for client_id, (client_socket, _) in list(self.clients.items()):
+        with self.lock:
+            for client_id, (client_socket, _, _) in list(self.clients.items()):
                 try:
                     client_socket.close()
                 except:
                     pass
+            
             self.clients.clear()
+            self.client_threads.clear()
         
         # Close server socket
         if self.server_socket:
-            self.server_socket.close()
-            self.server_socket = None
-    
-    def handle_client(self, client_socket, client_id):
-        """Handle communication with a client"""
-        client_socket.settimeout(0.1)  # Short timeout for non-blocking operations
-        
-        try:
-            while self.running:
-                try:
-                    # Try to receive data from client
-                    data = client_socket.recv(1024)
-                    if not data:
-                        # Client disconnected
-                        break
-                    
-                    # Process the received data
-                    message = json.loads(data.decode('utf-8'))
-                    self.on_message_received(client_id, message)
-                    
-                except socket.timeout:
-                    # No data available, just continue
-                    pass
-                except json.JSONDecodeError:
-                    print(f"Invalid JSON from client {client_id}")
-                except Exception as e:
-                    print(f"Error handling client {client_id}: {e}")
-                    break
-                
-                time.sleep(0.01)  # Small delay
-        finally:
-            # Clean up when client disconnects
-            with self.client_lock:
-                if client_id in self.clients:
-                    del self.clients[client_id]
-            
-            self.game.remove_player(client_id)
-            print(f"Client {client_id} disconnected")
-            
-            # Broadcast player disconnect to other clients
-            self.broadcast({
-                "type": "player_disconnect",
-                "player_id": client_id
-            })
-            
             try:
-                client_socket.close()
+                self.server_socket.close()
             except:
                 pass
-    
-    def on_message_received(self, client_id, message):
-        """Process a message received from a client"""
-        msg_type = message.get("type")
-        msg_data = message.get("data", {})
-        
-        # Process game-related messages
-        self.process_game_message(client_id, msg_type, msg_data)
-    
-    def process_game_message(self, client_id, message_type, message_data):
-        """Process game-related messages from clients"""
-        if message_type == "register":
-            # New player registration
-            player_name = message_data.get("player_name", f"Player{client_id}")
-            self.game.add_player(client_id, player_name)
             
-            # Send welcome message
-            self.send_to_client(client_id, {
-                "type": "welcome",
-                "player_id": client_id,
-                "player_name": player_name
-            })
-            
-            print(f"Registered new player: {player_name} (ID: {client_id})")
-            
-        elif message_type == "hit_report":
-            # A player reported being hit
-            shooter_id = message_data.get("shooter_id")
-            target_id = message_data.get("target_id")
-            
-            if shooter_id and target_id:
-                # Process the hit in the game logic
-                hit_success = self.game.process_hit(shooter_id, target_id)
-                
-                if hit_success:
-                    # Get updated target player state
-                    target_player = self.game.players.get(target_id)
-                    if target_player:
-                        # Notify target they were hit
-                        self.send_to_client(target_id, {
-                            "type": "hit",
-                            "shooter_id": shooter_id,
-                            "health": target_player.health,
-                            "is_alive": target_player.is_alive
-                        })
-                        
-                        # Notify shooter they scored a hit
-                        self.send_to_client(shooter_id, {
-                            "type": "hit_confirmed",
-                            "target_id": target_id,
-                            "score": self.game.players[shooter_id].score if shooter_id in self.game.players else 0
-                        })
-        
-        elif message_type == "start_game_request":
-            # Request to start the game
-            if self.game.state == "WAITING" and len(self.game.players) >= 2:
-                self.start_game()
-                
-        elif message_type == "shot_fired":
-            # Player fired a shot (for stats tracking)
-            if client_id in self.game.players:
-                self.game.players[client_id].record_shot()
-    
-    def start_game(self):
-        """Start a new game"""
-        if self.game.start_game():
-            # Broadcast game start to all clients
-            self.broadcast({
-                "type": "game_start",
-                "players": {
-                    str(p_id): {"name": p.name, "team": p.team}
-                    for p_id, p in self.game.players.items()
-                },
-                "settings": self.game.game_settings
-            })
-            
-            print("Game started!")
-    
-    def end_game(self):
-        """End the current game"""
-        result = self.game.end_game()
-        
-        # Broadcast game end to all clients
-        self.broadcast({
-            "type": "game_end",
-            "winner": result["winner"],
-            "winner_name": result["winner_name"],
-            "scores": result["scores"]
-        })
-        
-        print(f"Game ended! Winner: {result['winner_name']}")
-    
-    def send_to_client(self, client_id, message):
-        """Send a message to a specific client"""
-        try:
-            with self.client_lock:
-                if client_id in self.clients:
-                    client_socket, _ = self.clients[client_id]
-                    # Format message as JSON if it's not already a string
-                    if not isinstance(message, str):
-                        message = json.dumps(message)
-                    client_socket.send(message.encode('utf-8') + b'\n')
-                    return True
-        except Exception as e:
-            print(f"Error sending to client {client_id}: {e}")
-        return False
-    
-    def broadcast(self, message):
-        """Send a message to all connected clients"""
-        with self.client_lock:
-            # Format message as JSON if it's not already a string
-            if not isinstance(message, str):
-                message = json.dumps(message)
-                
-            for client_id, (client_socket, _) in list(self.clients.items()):
-                try:
-                    client_socket.send(message.encode('utf-8') + b'\n')
-                except Exception as e:
-                    print(f"Error broadcasting to client {client_id}: {e}")
-    
-    def game_loop(self):
-        """Main game update loop"""
-        while self.running:
-            # Update game state
-            if self.game.state == "ACTIVE":
-                # Check for game end
-                result = self.game.update()
-                if result:  # Game has ended
-                    self.end_game()
-                
-                # Update GUI if needed
-                if hasattr(self, 'gui') and self.gui:
-                    self.update_gui()
-            
-            time.sleep(0.1)  # Small delay
-    
-    def update_gui(self):
-        """Update the GUI with latest game state"""
-        if hasattr(self, 'gui') and self.gui:
-            self.gui.update_game_state(self.game.get_game_state())
+        print("Server has been shut down.")
+
+
+if __name__ == "__main__":
+    # Start the server on the default port
+    server = LaserTagServer(host='0.0.0.0', port=9999)
+    try:
+        server.start()
+    except KeyboardInterrupt:
+        print("\nShutting down server...")
+        server.shutdown()
