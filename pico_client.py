@@ -1,57 +1,49 @@
-from client import Client
+from NetworkEntity import NetworkEntity
 import network
 import socket
 import time
 import json
 import machine
 from machine import Pin
-
-# Import your hardware components
 from button import Button
-from ir_receiver import IRReceiver
-from ir_transmitter import IRTransmitter
 
-class PicoClient(Client):
+class PicoClient(NetworkEntity):
     def __init__(self, player_name, ssid, password, server_ip, server_port=9999):
-        super().__init__()
+        # Initialize with NetworkEntity parameters
+        super().__init__(
+            entity_type="client",
+            device_name=player_name,
+            ip_address=server_ip,
+            port=server_port,
+            connected=False
+        )
+        
         self.player_name = player_name
         self.ssid = ssid
         self.password = password
-        self.server_ip = server_ip
-        self.server_port = server_port
         
         # Player state
         self.player_id = None
-        self.health = 100
-        self.is_alive = True
-        self.game_active = False
         
         # Network state
         self.wlan = None
         self.sock = None
-        self.connected = False
         
-        # Set up hardware pins - adjust based on your actual connections
-        self.trigger_pin = 15  # Pin for trigger button
-        self.ir_receiver_pin = 16  # Pin for IR receiver
-        self.ir_transmitter_pin = 17  # Pin for IR transmitter
-        self.status_led_pin = 18  # Pin for status LED
+        # Set up hardware - we'll just use one button for simplicity
+        self.button_pin = 17  # Pin for the button
+        self.status_led_pin = 15  # Pin for status LED
         
         # Initialize hardware components
         self.setup_hardware()
     
     def setup_hardware(self):
         """Initialize hardware components"""
-        # Setup button with callback
-        self.trigger = Button(Pin(self.trigger_pin, Pin.IN, Pin.PULL_UP))
-        self.trigger.set_callback(self.on_trigger_pressed)
-        
-        # Setup IR receiver with callback
-        self.ir_receiver = IRReceiver(Pin(self.ir_receiver_pin, Pin.IN))
-        self.ir_receiver.set_callback(self.on_ir_received)
-        
-        # Setup IR transmitter
-        self.ir_transmitter = IRTransmitter(Pin(self.ir_transmitter_pin, Pin.OUT))
+        # Setup button with internal pulldown
+        self.button = Button(
+            self.button_pin, 
+            rest_state=False, 
+            internal_pulldown=True
+        )
         
         # Setup status LED
         self.status_led = Pin(self.status_led_pin, Pin.OUT)
@@ -84,35 +76,64 @@ class PicoClient(Client):
     def connect_to_server(self):
         """Connect to the game server"""
         try:
-            addr = socket.getaddrinfo(self.server_ip, self.server_port)[0][-1]
+            addr = socket.getaddrinfo(self.ip_address, self.port)[0][-1]
             self.sock = socket.socket()
+            # Socket is set to blocking mode by default
             self.sock.connect(addr)
-            self.sock.settimeout(0.1)  # Short timeout for non-blocking operation
             print("Connected to server")
             
-            # Register with server
-            self.send_message("register", {"player_name": self.player_name})
-            
+            # Set connected flag first
             self.connected = True
+            
+            # Then register with server
+            registration_success = self.send_message("register", {"player_name": self.player_name})
+            
+            if not registration_success:
+                print("Failed to register with server")
+                self.connected = False
+                return False
+                
+            print("Registration message sent to server")
             return True
         except Exception as e:
             print(f"Server connection failed: {e}")
+            self.connected = False
             return False
     
     def send_message(self, msg_type, data=None):
         """Send a message to the server"""
         if not self.connected or not self.sock:
+            print("Not connected - can't send message")
             return False
         
-        message = {
-            "type": msg_type,
-            "player_id": self.player_id,
-            "player_name": self.player_name,
-            "data": data or {}
-        }
+        if data is None:
+            data = {}
+        
+        # Create base message
+        message = {"type": msg_type}
+        
+        # Add player info if available
+        if self.player_id is not None:
+            message["player_id"] = self.player_id
+        
+        if self.player_name:
+            message["player_name"] = self.player_name
+        
+        # Add any additional data
+        message.update(data)
         
         try:
-            self.sock.send(json.dumps(message).encode('utf-8') + b'\n')
+            # Convert to JSON and add newline
+            json_message = json.dumps(message).encode('utf-8') + b'\n'
+            print(f"Sending message: {message}")
+            
+            # Send the data with blocking socket
+            bytes_sent = self.sock.send(json_message)
+            
+            # Check if all bytes were sent
+            if bytes_sent != len(json_message):
+                print(f"Warning: Only sent {bytes_sent} of {len(json_message)} bytes")
+                
             return True
         except Exception as e:
             print(f"Send error: {e}")
@@ -125,12 +146,38 @@ class PicoClient(Client):
             return None
         
         try:
-            data = self.sock.recv(1024)
-            if data:
-                return json.loads(data.decode('utf-8'))
-        except Exception:
-            # Timeout or other error - just continue
-            pass
+            # Use non-blocking receive with a manual timeout approach
+            self.sock.setblocking(False)
+            try:
+                data = self.sock.recv(1024)
+                
+                if data:
+                    try:
+                        # Print raw data for debugging
+                        print(f"Received raw data: {data}")
+                        
+                        # Try to parse JSON message(s)
+                        messages = []
+                        for line in data.decode('utf-8').strip().split('\n'):
+                            if line:
+                                messages.append(json.loads(line))
+                        
+                        if messages:
+                            # Reset to blocking mode
+                            self.sock.setblocking(True)
+                            return messages[0]  # Return first message for now
+                    except json.JSONDecodeError as e:
+                        print(f"JSON decode error: {e}")
+            except OSError as e:
+                # This is the expected exception when no data is available
+                # Don't print anything for this case
+                pass
+            
+            # Reset to blocking mode
+            self.sock.setblocking(True)
+        except Exception as e:
+            print(f"Receive error: {e}")
+            # Don't change connection status here, let the main loop handle reconnections
         
         return None
     
@@ -139,63 +186,33 @@ class PicoClient(Client):
         if not message:
             return
         
+        print(f"Processing message: {message}")
+        
         msg_type = message.get("type")
         
         if msg_type == "welcome":
             self.player_id = message.get("player_id")
             print(f"Registered with server as Player {self.player_id}")
             self.flash_led(3, 0.2)  # Flash LED 3 times
+    
+    def check_button(self):
+        """Check if button is pressed and send message if so"""
+        # Update button state
+        self.button.update()
         
-        elif msg_type == "game_start":
-            self.game_active = True
-            self.health = 100
-            self.is_alive = True
-            print("Game started!")
-            self.flash_led(3, 0.2)  # Flash LED to indicate game start
-        
-        elif msg_type == "game_end":
-            self.game_active = False
-            print("Game ended!")
-            winner = message.get("winner_name", "Unknown")
-            print(f"Winner: {winner}")
-            self.flash_led(5, 0.1)  # Flash LED to indicate game end
+        # Check if button is active (pressed)
+        if self.button.read():
+            print("Button pressed! Sending to server...")
+            self.flash_led(1, 0.1)  # Quick flash to indicate button press
             
-        elif msg_type == "hit":
-            # We've been hit!
-            if self.game_active and self.is_alive:
-                self.health = message.get("health", self.health)
-                if self.health <= 0:
-                    self.is_alive = False
-                    print("You've been eliminated!")
-                    self.flash_led(5, 0.1)  # Show death animation on LED
-                else:
-                    print(f"Hit! Health: {self.health}")
-                    self.flash_led(1, 0.1)  # Quick LED flash for hit
-        
-        elif msg_type == "respawn":
-            self.is_alive = True
-            self.health = message.get("health", 100)
-            print(f"Respawned! Health: {self.health}")
-            self.flash_led(2, 0.3)  # Show respawn animation
-    
-    def on_ir_received(self, shooter_id):
-        """Called when IR receiver detects a signal"""
-        if self.game_active and self.is_alive:
-            print(f"Hit by player {shooter_id}!")
-            # Send hit information to server
-            self.send_message("hit_report", {
-                "target_id": self.player_id,  # I was hit
-                "shooter_id": shooter_id  # Player who shot me
+            # Send button press message to server
+            self.send_message("button_press", {
+                "button_pin": self.button_pin,
+                "player_name": self.player_name
             })
-    
-    def on_trigger_pressed(self):
-        """Called when trigger button is pressed"""
-        if self.game_active and self.is_alive:
-            print("Firing!")
-            # Transmit our player ID via IR
-            self.ir_transmitter.transmit(self.player_id)
-            # Report shot to server for stats
-            self.send_message("shot_fired", {})
+            
+            # Small delay to prevent multiple triggers
+            time.sleep(0.2)
     
     def flash_led(self, count, duration):
         """Flash the status LED"""
@@ -204,6 +221,23 @@ class PicoClient(Client):
             time.sleep(duration)
             self.status_led.value(0)
             time.sleep(duration)
+    
+    # Override NetworkEntity abstract methods
+    def accept_connections(self):
+        """Not used in client"""
+        pass
+        
+    def handle_client(self, client_socket):
+        """Not used in client"""
+        pass
+        
+    def broadcast_message(self, message):
+        """Not used in client"""
+        pass
+        
+    def disconnect_client(self, client_socket):
+        """Not used in client"""
+        pass
     
     def run(self):
         """Main loop for the client"""
@@ -223,17 +257,39 @@ class PicoClient(Client):
         
         # Main loop
         last_heartbeat = time.time()
+        last_reconnect_attempt = 0
+        reconnect_interval = 5  # seconds between reconnection attempts
+        
         try:
             while True:
+                # First check if we're still connected
+                if not self.connected:
+                    current_time = time.time()
+                    if current_time - last_reconnect_attempt >= reconnect_interval:
+                        print("Attempting to reconnect to server...")
+                        if self.connect_to_server():
+                            print("Reconnected to server!")
+                            self.flash_led(3, 0.2)
+                        last_reconnect_attempt = current_time
+                    # Skip the rest of the loop if we're not connected
+                    time.sleep(0.1)
+                    continue
+                
                 # Check for messages from server
                 message = self.receive_message()
                 if message:
                     self.on_message_received(message)
                 
+                # Check button
+                self.check_button()
+                
                 # Send heartbeat every 5 seconds
                 current_time = time.time()
                 if current_time - last_heartbeat >= 5:
-                    self.send_message("heartbeat", {"health": self.health})
+                    print("Sending heartbeat...")
+                    if not self.send_message("heartbeat", {}):
+                        print("Failed to send heartbeat - connection may be lost")
+                        self.connected = False
                     last_heartbeat = current_time
                 
                 # Small delay to prevent 100% CPU usage
@@ -246,13 +302,13 @@ class PicoClient(Client):
                 time.sleep(1)
 
 
-# Example usage for main.py on the Pico W
+# Main execution
 if __name__ == "__main__":
-    # Configuration (should be customized for your network)
+    # Configuration (customize for your network)
     PLAYER_NAME = "Player1"
-    WIFI_SSID = "YourWiFiNetwork"
-    WIFI_PASSWORD = "YourWiFiPassword"
-    SERVER_IP = "192.168.1.XXX"  # Replace with your server's IP address
+    WIFI_SSID = "Melmany"  # Replace with your WiFi name
+    WIFI_PASSWORD = "Melmansan2012"  # Replace with your WiFi password
+    SERVER_IP = "192.168.1.221"  # Replace with your server's IP address
     
     # Create and run the client
     client = PicoClient(PLAYER_NAME, WIFI_SSID, WIFI_PASSWORD, SERVER_IP)
