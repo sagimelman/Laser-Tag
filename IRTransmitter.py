@@ -1,126 +1,162 @@
+import machine
 from machine import Pin, PWM
 import time
-from IRcomponent import IRComponent
+from IRComponent import IRComponent
 
 class IRTransmitter(IRComponent):
     """
-    IR Transmitter class for sending IR signals.
+    IR Transmitter class for encoding and sending IR signals.
     """
     def __init__(self, pin, frequency=38000):
         """
         Initialize the IR transmitter.
         
-        :param pin: GPIO pin number the IR transmitter is connected to
+        :param pin: GPIO pin number the IR LED is connected to
         :param frequency: IR carrier frequency in Hz (default: 38kHz)
         """
         super().__init__(pin, Pin.OUT, frequency)
         self.is_enabled = True
         self.pwm = None
-        
-        # For laser tag, we'll use simple codes with these parameters
-        self.header_pulse = 5000  # 5ms header pulse
-        self.bit_pulse_short = 500  # 0.5ms for short pulse (0 bit)
-        self.bit_pulse_long = 1500  # 1.5ms for long pulse (1 bit)
-        self.gap = 500  # 0.5ms gap between pulses
-        
+        self._setup_pwm()
+    
     def _setup_pwm(self):
-        """Set up PWM for IR carrier frequency"""
-        if self.pwm is None:
+        """Set up the PWM for the IR LED"""
+        try:
             self.pwm = PWM(self.pin)
             self.pwm.freq(self.frequency)
-            
-    def _send_carrier(self, duration_us):
-        """
-        Send IR carrier signal for the specified duration.
-        
-        :param duration_us: Duration in microseconds
-        """
-        self._setup_pwm()
-        
-        # 50% duty cycle (32767 is 50% of 65535)
-        self.pwm.duty_u16(32767)
-        time.sleep_us(duration_us)
-        self.pwm.duty_u16(0)
-        
-    def _send_space(self, duration_us):
-        """
-        Send IR space (no signal) for the specified duration.
-        
-        :param duration_us: Duration in microseconds
-        """
-        time.sleep_us(duration_us)
+            self.pwm.duty_u16(0)  # Start with PWM off
+        except Exception as e:
+            print(f"Error setting up PWM: {e}")
+    
+    def _carrier_on(self):
+        """Turn on the IR carrier signal"""
+        if self.pwm:
+            self.pwm.duty_u16(32768)  # 50% duty cycle (32768 is half of 65535)
+    
+    def _carrier_off(self):
+        """Turn off the IR carrier signal"""
+        if self.pwm:
+            self.pwm.duty_u16(0)
     
     def send_code(self, code):
         """
-        Send an IR code using the transmitter.
+        Send an IR code.
         
-        :param code: The code to transmit (integer)
+        :param code: The code to transmit (player ID or command)
         :return: True if successful, False otherwise
         """
-        if not self.is_enabled:
+        if not self.is_enabled or not self.pwm:
             return False
-            
-        # Encode the code into pulse timings
-        encoded_data = self.encode(code)
         
-        # Send header pulse
-        self._send_carrier(self.header_pulse)
-        self._send_space(self.gap)
+        # Encode the code into raw timing data
+        raw_data = self.encode(code)
+        if not raw_data:
+            return False
         
-        # Send each bit of the code
-        for bit_duration in encoded_data:
-            self._send_carrier(bit_duration)
-            self._send_space(self.gap)
-            
-        # Ensure carrier is turned off
-        if self.pwm:
-            self.pwm.duty_u16(0)
-            
+        # Transmit the encoded signal
+        self._transmit_signal(raw_data)
         return True
+    
+    def _transmit_signal(self, raw_data):
+        """
+        Transmit the encoded IR signal using the raw timing data.
+        
+        :param raw_data: List of pulse durations in microseconds
+        """
+        # Disable IRQs during transmission for more accurate timing
+        irq_state = machine.disable_irq()
+        
+        try:
+            # Simplified transmission protocol:
+            # - Each element in raw_data represents a pulse duration
+            # - Even indices (0, 2, 4...) are carrier ON durations
+            # - Odd indices (1, 3, 5...) are carrier OFF durations
+            
+            for i, duration in enumerate(raw_data):
+                if i % 2 == 0:
+                    # Even index - turn carrier on
+                    self._carrier_on()
+                else:
+                    # Odd index - turn carrier off
+                    self._carrier_off()
+                
+                # Wait for the specified duration
+                # Convert microseconds to smaller units for more precise timing
+                if duration > 0:
+                    start = time.ticks_us()
+                    while time.ticks_diff(time.ticks_us(), start) < duration:
+                        pass
+            
+            # Ensure carrier is off when done
+            self._carrier_off()
+        finally:
+            # Re-enable IRQs
+            machine.enable_irq(irq_state)
     
     def encode(self, code):
         """
-        Encode a code into raw IR pulse/space timings.
+        Encode a code into raw IR data format.
         
-        :param code: The code to encode (integer)
+        :param code: The code to encode (player ID or command)
         :return: List of pulse durations in microseconds
         """
-        # Convert to integer if not already
-        try:
-            code_int = int(code)
-        except (ValueError, TypeError):
-            raise ValueError("Code must be convertible to an integer")
-            
-        # Convert to binary and remove '0b' prefix
-        binary = bin(code_int)[2:]
+        if not isinstance(code, int):
+            try:
+                code = int(code)
+            except ValueError:
+                print("Error: Code must be an integer or convertible to integer")
+                return None
         
-        # Pad with leading zeros to ensure minimum length (16 bits)
-        # MicroPython may not have zfill, so using manual padding
-        binary = '0' * (16 - len(binary)) + binary
+        # Create a simple encoding scheme for laser tag
+        # Start with a header pulse
+        raw_data = [3000, 1000]  # 3ms on, 1ms off as header
         
-        # Convert to pulse durations
-        pulses = []
-        for bit in binary:
-            if bit == '0':
-                pulses.append(self.bit_pulse_short)
-            else:  # bit == '1'
-                pulses.append(self.bit_pulse_long)
-                
-        return pulses
-    
-    def receive_code(self, timeout=None):
-        """Not applicable for transmitters"""
-        raise NotImplementedError("Transmitters cannot receive codes")
+        # Encode each bit of the code
+        for i in range(8):  # Assuming 8-bit codes for simplicity
+            bit = (code >> i) & 1
+            if bit == 1:
+                # Long pulse for 1
+                raw_data.extend([1000, 500])  # 1ms on, 0.5ms off
+            else:
+                # Short pulse for 0
+                raw_data.extend([500, 500])  # 0.5ms on, 0.5ms off
+        
+        # Add a stop bit
+        raw_data.append(500)  # 0.5ms final pulse
+        
+        return raw_data
     
     def decode(self, raw_data):
-        """Not typically needed for transmitters but could be implemented"""
-        raise NotImplementedError("Decode not implemented for transmitters")
-    
-    def cleanup(self):
-        """Clean up resources used by transmitter"""
-        if self.pwm:
-            self.pwm.deinit()
-            self.pwm = None
+        """
+        Not typically used for transmitters, but implemented for completeness.
+        
+        :param raw_data: Raw IR data to decode
+        :return: Decoded integer value or None if invalid
+        """
+        # We'll implement a simple version here, but it's not the primary
+        # function of a transmitter
+        if not raw_data or len(raw_data) < 3:
+            return None
+        
+        # Skip header (first two timings)
+        data_pulses = raw_data[2:-1]  # Skip header and stop bit
+        
+        if len(data_pulses) < 16:  # Need at least 16 pulses for 8 bits (on/off pairs)
+            return None
+        
+        result = 0
+        for i in range(0, min(16, len(data_pulses)), 2):
+            # Check if the ON pulse is long (representing 1) or short (representing 0)
+            if data_pulses[i] > 750:  # Threshold between short and long pulses
+                bit_value = 1
+            else:
+                bit_value = 0
+            
+            # Add this bit to our result
+            bit_position = i // 2
+            result |= (bit_value << bit_position)
+        
+        return result
     
     # Implement Component's abstract methods
     def enable(self):
@@ -130,12 +166,12 @@ class IRTransmitter(IRComponent):
     def disable(self):
         """Disable the IR transmitter"""
         self.is_enabled = False
-        self.cleanup()
+        self._carrier_off()  # Ensure IR is off when disabled
     
     def read(self):
         """Not typically used for transmitters"""
-        return None
+        raise NotImplementedError("Cannot read from an output IR transmitter")
     
     def write(self, value):
-        """Send the specified value as an IR code"""
+        """Send a code (same as send_code)"""
         return self.send_code(value)
