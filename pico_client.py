@@ -132,13 +132,25 @@ def shoot():
     
     print("Shooting!")
     
+    # Create a quick pulse effect on the shoot LED
+    for _ in range(3):  # Flash 3 times quickly
+        shoot_led.value(1)
+        time.sleep(0.05)
+        shoot_led.value(0)
+        time.sleep(0.05)
+    
     # 1. Transmit IR signal with player ID
+    shoot_led.value(1)  # Keep LED on during transmission
     ir_success = ir_transmitter.send_code(PLAYER_ID)
+    time.sleep(0.1)  # Keep lit briefly after transmission
+    shoot_led.value(0)
+    
     if ir_success:
         print("IR signal transmitted")
     else:
         print("Failed to transmit IR signal")
     
+    # Rest of the function unchanged
     # 2. Send message to server if connected
     if connected and sock:
         message = {
@@ -167,6 +179,7 @@ def shoot():
         # Still flash status LED to confirm shot
         flash_led(1, 0.1)
         return ir_success
+last_shoot_time = 0
 
 # Initialize components
 button = Button(button_pin, rest_state=False, internal_pulldown=True)
@@ -174,8 +187,7 @@ status_led = Pin(status_led_pin, Pin.OUT)
 shoot_led = Pin(shoot_led_pin, Pin.OUT)  # LED to indicate shooting
 ir_transmitter = CustomIRTransmitter(ir_led_pin, shoot_led_pin)
 
-# Main execution
-print("Starting Laser Tag client...")
+# Main executionprint("Starting Laser Tag client...")
 
 # Connect to WiFi
 if not connect_wifi():
@@ -204,10 +216,17 @@ try:
         
         # Check if button is active (pressed) using your Button class's read method
         if button.read():
-            print("Button pressed! Shooting...")
-            shoot()
-            # Small delay to prevent multiple triggers
-            time.sleep(0.2)
+            # Get current time
+            current_time = time.time()
+            
+            # Only shoot if enough time has passed since the last shot
+            if current_time - last_shoot_time > 0.5:  # 500ms debounce period
+                print("Button pressed! Shooting...")
+                shoot()
+                # Update the last shoot time
+                last_shoot_time = current_time
+            else:
+                print("Button press ignored (debounce)")
         
         # Small delay to prevent 100% CPU usage
         time.sleep(0.01)
