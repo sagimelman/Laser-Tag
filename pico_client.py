@@ -2,34 +2,41 @@ import network
 import socket
 import time
 import json
+import machine
 from machine import Pin
 from button import Button  # Import your Button class
+from IRTransmitter import IRTransmitter  # Import the IR Transmitter class
 
 # Configuration 
 PLAYER_NAME = "Player1"
+PLAYER_ID = 1  # Unique ID for this player
 WIFI_SSID = "Melmany"  # Your WiFi name
 WIFI_PASSWORD = "Melmansan2012"  # Your WiFi password
 SERVER_IP = "192.168.1.221"  # Your server's IP address
 SERVER_PORT = 9999
 
-# Setup basic hardware
+# Setup hardware
 button_pin = 16  # Pin for the button
-status_led_pin = 25  # Pin for status LED
+status_led_pin = 15  # Pin for status LED
+ir_led_pin = 14  # Pin for IR LED transmitter
+shoot_led_pin = 13  # Pin for visible LED that shows when IR is active
 
-# Use your Button class with internal pulldown
+# Initialize components
 button = Button(button_pin, rest_state=False, internal_pulldown=True)
 status_led = Pin(status_led_pin, Pin.OUT)
+shoot_led = Pin(shoot_led_pin, Pin.OUT)  # LED to indicate shooting
+ir_transmitter = IRTransmitter(ir_led_pin)
 
 # Global variables
 connected = False
 sock = None
 
 def flash_led(count, duration):
-    """Flash the built-in status LED on the Raspberry Pi Pico"""
+    """Flash the status LED"""
     for _ in range(count):
-        status_led.value(1)  # Turn LED on
+        status_led.value(1)
         time.sleep(duration)
-        status_led.value(0)  # Turn LED off
+        status_led.value(0)
         time.sleep(duration)
 
 def connect_wifi():
@@ -73,7 +80,8 @@ def connect_to_server():
         # Register with server
         message = {
             "type": "register",
-            "player_name": PLAYER_NAME
+            "player_name": PLAYER_NAME,
+            "player_id": PLAYER_ID
         }
         
         json_message = json.dumps(message).encode('utf-8')
@@ -86,34 +94,88 @@ def connect_to_server():
         connected = False
         return False
 
+# Modify the IRTransmitter class to include LED control
+class CustomIRTransmitter(IRTransmitter):
+    """Extended IR Transmitter with visible LED indication"""
+    
+    def __init__(self, pin, led_pin=None, frequency=38000):
+        """
+        Initialize the IR transmitter with visible LED indicator.
+        
+        :param pin: GPIO pin number the IR LED is connected to
+        :param led_pin: GPIO pin for visible LED (None if not used)
+        :param frequency: IR carrier frequency in Hz (default: 38kHz)
+        """
+        super().__init__(pin, frequency)
+        
+        # Set up visible LED if provided
+        self.led_pin = None
+        if led_pin is not None:
+            self.led_pin = Pin(led_pin, Pin.OUT)
+            self.led_pin.value(0)  # Make sure LED is off initially
+    
+    def _carrier_on(self):
+        """Turn on the IR carrier signal and visible LED"""
+        if self.pwm:
+            self.pwm.duty_u16(32768)  # 50% duty cycle
+        
+        # Also turn on visible LED if available
+        if self.led_pin:
+            self.led_pin.value(1)
+    
+    def _carrier_off(self):
+        """Turn off the IR carrier signal and visible LED"""
+        if self.pwm:
+            self.pwm.duty_u16(0)
+        
+        # Also turn off visible LED if available
+        if self.led_pin:
+            self.led_pin.value(0)
+
+# Replace the regular IRTransmitter with our custom one
+ir_transmitter = CustomIRTransmitter(ir_led_pin, shoot_led_pin)
+
 def shoot():
-    """Send a shoot message to the server"""
+    """Send a shoot message and IR signal"""
     global connected, sock
     
-    if not connected or not sock:
-        print("Not connected - can't send message")
-        return False
+    print("Shooting!")
     
-    message = {
-        "type": "shoot",
-        "player_name": PLAYER_NAME
-    }
+    # 1. Transmit IR signal with player ID
+    ir_success = ir_transmitter.send_code(PLAYER_ID)
+    if ir_success:
+        print("IR signal transmitted")
+    else:
+        print("Failed to transmit IR signal")
     
-    try:
-        json_message = json.dumps(message).encode('utf-8')
-        print("Sending shoot message:", message)
+    # 2. Send message to server if connected
+    if connected and sock:
+        message = {
+            "type": "shoot",
+            "player_name": PLAYER_NAME,
+            "player_id": PLAYER_ID
+        }
         
-        # Send the data
-        bytes_sent = sock.send(json_message)
-        
-        # Flash LED to confirm
+        try:
+            json_message = json.dumps(message).encode('utf-8')
+            print("Sending shoot message to server:", message)
+            
+            # Send the data
+            bytes_sent = sock.send(json_message)
+            
+            # Flash status LED to confirm
+            flash_led(1, 0.1)
+            
+            return True
+        except Exception as e:
+            print(f"Send error: {e}")
+            connected = False
+            return False
+    else:
+        print("Not connected to server - local IR shooting only")
+        # Still flash status LED to confirm shot
         flash_led(1, 0.1)
-        
-        return True
-    except Exception as e:
-        print(f"Send error: {e}")
-        connected = False
-        return False
+        return ir_success
 
 # Main execution
 print("Starting Laser Tag client...")
