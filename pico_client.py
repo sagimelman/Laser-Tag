@@ -15,21 +15,53 @@ WIFI_PASSWORD = "Melmansan2012"  # Your WiFi password
 SERVER_IP = "192.168.1.221"  # Your server's IP address
 SERVER_PORT = 9999
 
+# Global variables
+connected = False
+sock = None
+
 # Setup hardware
 button_pin = 16  # Pin for the button
 status_led_pin = 15  # Pin for status LED
 ir_led_pin = 14  # Pin for IR LED transmitter
 shoot_led_pin = 13  # Pin for visible LED that shows when IR is active
 
-# Initialize components
-button = Button(button_pin, rest_state=False, internal_pulldown=True)
-status_led = Pin(status_led_pin, Pin.OUT)
-shoot_led = Pin(shoot_led_pin, Pin.OUT)  # LED to indicate shooting
-ir_transmitter = IRTransmitter(ir_led_pin)
-
-# Global variables
-connected = False
-sock = None
+# Define your custom class first before using it
+class CustomIRTransmitter(IRTransmitter):
+    """Extended IR Transmitter with visible LED indication"""
+    
+    def __init__(self, pin, led_pin=None, frequency=38000):
+        """
+        Initialize the IR transmitter with visible LED indicator.
+        
+        :param pin: GPIO pin number the IR LED is connected to
+        :param led_pin: GPIO pin for visible LED (None if not used)
+        :param frequency: IR carrier frequency in Hz (default: 38kHz)
+        """
+        super().__init__(pin, frequency)
+        
+        # Set up visible LED if provided
+        self.led_pin = None
+        if led_pin is not None:
+            self.led_pin = Pin(led_pin, Pin.OUT)
+            self.led_pin.value(0)  # Make sure LED is off initially
+    
+    def _carrier_on(self):
+        """Turn on the IR carrier signal and visible LED"""
+        if self.pwm:
+            self.pwm.duty_u16(32768)  # 50% duty cycle
+        
+        # Also turn on visible LED if available
+        if self.led_pin:
+            self.led_pin.value(1)
+    
+    def _carrier_off(self):
+        """Turn off the IR carrier signal and visible LED"""
+        if self.pwm:
+            self.pwm.duty_u16(0)
+        
+        # Also turn off visible LED if available
+        if self.led_pin:
+            self.led_pin.value(0)
 
 def flash_led(count, duration):
     """Flash the status LED"""
@@ -94,47 +126,6 @@ def connect_to_server():
         connected = False
         return False
 
-# Modify the IRTransmitter class to include LED control
-class CustomIRTransmitter(IRTransmitter):
-    """Extended IR Transmitter with visible LED indication"""
-    
-    def __init__(self, pin, led_pin=None, frequency=38000):
-        """
-        Initialize the IR transmitter with visible LED indicator.
-        
-        :param pin: GPIO pin number the IR LED is connected to
-        :param led_pin: GPIO pin for visible LED (None if not used)
-        :param frequency: IR carrier frequency in Hz (default: 38kHz)
-        """
-        super().__init__(pin, frequency)
-        
-        # Set up visible LED if provided
-        self.led_pin = None
-        if led_pin is not None:
-            self.led_pin = Pin(led_pin, Pin.OUT)
-            self.led_pin.value(0)  # Make sure LED is off initially
-    
-    def _carrier_on(self):
-        """Turn on the IR carrier signal and visible LED"""
-        if self.pwm:
-            self.pwm.duty_u16(32768)  # 50% duty cycle
-        
-        # Also turn on visible LED if available
-        if self.led_pin:
-            self.led_pin.value(1)
-    
-    def _carrier_off(self):
-        """Turn off the IR carrier signal and visible LED"""
-        if self.pwm:
-            self.pwm.duty_u16(0)
-        
-        # Also turn off visible LED if available
-        if self.led_pin:
-            self.led_pin.value(0)
-
-# Replace the regular IRTransmitter with our custom one
-ir_transmitter = CustomIRTransmitter(ir_led_pin, shoot_led_pin)
-
 def shoot():
     """Send a shoot message and IR signal"""
     global connected, sock
@@ -176,6 +167,12 @@ def shoot():
         # Still flash status LED to confirm shot
         flash_led(1, 0.1)
         return ir_success
+
+# Initialize components
+button = Button(button_pin, rest_state=False, internal_pulldown=True)
+status_led = Pin(status_led_pin, Pin.OUT)
+shoot_led = Pin(shoot_led_pin, Pin.OUT)  # LED to indicate shooting
+ir_transmitter = CustomIRTransmitter(ir_led_pin, shoot_led_pin)
 
 # Main execution
 print("Starting Laser Tag client...")
