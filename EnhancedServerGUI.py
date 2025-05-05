@@ -730,3 +730,4 @@ if __name__ == "__main__":
         LaserTagServerApp().run()
     except Exception as e:
         logging.error(f"Application error: {str(e)}")
+
