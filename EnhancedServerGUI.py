@@ -149,6 +149,7 @@ class GameServer:
     def process_message(self, message, client_id, client_socket):
         msg_type = message.get('type')
         if msg_type == 'register':
+            # Existing code for handling 'register' messages
             player_name = message.get('player_name', f"Player_{client_id[-4:]}")
             with self.lock:
                 if len(self.game_state['active_players']) >= self.game_state['max_players']:
@@ -172,6 +173,12 @@ class GameServer:
                     if old_name:
                         Clock.schedule_once(lambda dt: self.gui_callback(f"PLAYER_LEFT:{old_name}"), 0)
                     Clock.schedule_once(lambda dt: self.gui_callback(f"PLAYER_JOINED:{player_name}"), 0)
+        
+        # Add this new elif block to handle shoot messages
+        elif msg_type == 'shoot':
+            player_name = self.player_names.get(client_id, f"Player_{client_id[-4:]}")
+            player_id = message.get('player_id', 'unknown')
+            self.log(f"SHOOT: {player_name} (ID: {player_id}) fired their weapon!")
 
     def start_game(self):
         with self.lock:
@@ -288,56 +295,40 @@ class GameServer:
             return False
 
     def disconnect_client(self, client_id):
-        """Safely disconnect a client and update UI"""
         try:
             with self.lock:
                 if client_id in self.clients:
                     player_name = self.player_names.get(client_id)
                     
-                    # 1. First close the socket
                     try:
                         client_socket, _ = self.clients[client_id]
-                        try:
-                            client_socket.shutdown(socket.SHUT_RDWR)
-                        except:
-                            pass  # Socket might already be shut down
                         client_socket.close()
                     except Exception as e:
                         self.log(f"Error closing client socket: {str(e)}", 'error')
                     
-                    # 2. Remove from data structures
-                    try:
-                        # Remove from active players list if present
-                        if player_name and player_name in self.game_state['active_players']:
+                    # Remove from active players list if present
+                    if player_name and player_name in self.game_state['active_players']:
+                        try:
                             self.game_state['active_players'].remove(player_name)
-                    except Exception as e:
-                        self.log(f"Error removing player from active list: {str(e)}", 'error')
+                        except Exception as e:
+                            self.log(f"Error removing player from active list: {str(e)}", 'error')
                     
+                    # Remove from clients and player_names dictionaries
                     try:
-                        # Remove from clients dictionary
-                        if client_id in self.clients:
-                            del self.clients[client_id]
+                        del self.clients[client_id]
                     except Exception as e:
                         self.log(f"Error removing client: {str(e)}", 'error')
                         
                     try:
-                        # Remove from player_names dictionary
                         if client_id in self.player_names:
                             del self.player_names[client_id]
                     except Exception as e:
                         self.log(f"Error removing player name: {str(e)}", 'error')
                     
-                    # 3. Notify UI (only if we have a player name)
                     if player_name:
                         self.log(f"Client disconnected: {player_name}")
-                        # Use Clock to ensure UI updates happen on the main thread
-                        def notify_ui():
-                            try:
-                                self.gui_callback(f"PLAYER_LEFT:{player_name}")
-                            except Exception as e:
-                                logging.error(f"Error in UI notification: {str(e)}")
-                        
-                        Clock.schedule_once(lambda dt: notify_ui(), 0)
+                        # Notify UI through Clock to ensure it runs on the main thread
+                        Clock.schedule_once(lambda dt: self.gui_callback(f"PLAYER_LEFT:{player_name}"), 0)
         except Exception as e:
             self.log(f"Disconnect client error: {str(e)}", 'error')
 
@@ -582,11 +573,8 @@ class ServerGUI(BoxLayout):
             logging.error(f"Error adding player to list: {str(e)}")
 
     def remove_player_from_list(self, player_name):
-        """Safely remove a player from the UI list"""
         try:
             children_to_remove = []
-            
-            # Find the widget to remove (safely)
             for child in list(self.player_list_container.children):
                 try:
                     if isinstance(child, BoxLayout):
@@ -596,27 +584,12 @@ class ServerGUI(BoxLayout):
                                 break
                 except Exception as e:
                     logging.error(f"Error checking player widget: {str(e)}")
-                    continue  # Continue checking other widgets even if one fails
             
-            # Remove found widgets (safely)
             for child in children_to_remove:
                 try:
-                    # Use Clock to ensure we remove on the main thread
-                    def remove_widget_safe(widget):
-                        try:
-                            if widget in self.player_list_container.children:
-                                self.player_list_container.remove_widget(widget)
-                        except Exception as e:
-                            logging.error(f"Error in scheduled widget removal: {str(e)}")
-                    
-                    Clock.schedule_once(lambda dt, w=child: remove_widget_safe(w), 0)
+                    self.player_list_container.remove_widget(child)
                 except Exception as e:
-                    logging.error(f"Error scheduling widget removal: {str(e)}")
-            
-            # Update even if we didn't find any widgets to remove
-            if not children_to_remove:
-                logging.warning(f"Could not find player {player_name} widget to remove")
-                
+                    logging.error(f"Error removing player widget: {str(e)}")
         except Exception as e:
             logging.error(f"Error in remove_player_from_list: {str(e)}")
 
@@ -633,29 +606,11 @@ class ServerGUI(BoxLayout):
             player_name = getattr(instance, 'player_name', None)
             if player_name:
                 logging.info(f"Kick button pressed for player: {player_name}")
-                # Instead of using Clock, we'll call directly but in a try-except block
-                self.update_status(f"Attempting to kick player {player_name}...")
-                
-                # Create a separate thread to handle the kick to avoid UI blocking
-                def kick_thread_func():
-                    try:
-                        result = self.server.kick_player(player_name)
-                        # Update UI on main thread
-                        Clock.schedule_once(lambda dt: self.update_status(
-                            f"Player {player_name} has been kicked" if result 
-                            else f"Failed to kick player {player_name}"), 0)
-                    except Exception as e:
-                        error_msg = f"Error in kick thread: {str(e)}"
-                        logging.error(error_msg)
-                        Clock.schedule_once(lambda dt: self.update_status(error_msg, 'error'), 0)
-                
-                # Start thread
-                thread = threading.Thread(target=kick_thread_func, daemon=True)
-                thread.start()
+                # Create a delay to ensure UI remains responsive
+                Clock.schedule_once(lambda dt: self.kick_player(player_name), 0.1)
         except Exception as e:
-            error_msg = f"Error in kick button handler: {str(e)}"
-            logging.error(error_msg)
-            self.update_status(error_msg, 'error')
+            logging.error(f"Error in kick button handler: {str(e)}")
+            self.update_status(f"Error in kick button: {str(e)}")
 
     def update_max_players(self, instance, value):
         try:
