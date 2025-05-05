@@ -1,234 +1,732 @@
-import network
+from kivy.app import App
+from kivy.uix.boxlayout import BoxLayout
+from kivy.uix.gridlayout import GridLayout
+from kivy.uix.label import Label
+from kivy.uix.textinput import TextInput
+from kivy.uix.button import Button
+from kivy.uix.spinner import Spinner
+from kivy.uix.scrollview import ScrollView
+from kivy.core.window import Window
+from kivy.graphics import Color, RoundedRectangle
+from kivy.properties import ListProperty, StringProperty
+from kivy.clock import Clock
+from datetime import datetime
+import logging
 import socket
-import time
+import threading
 import json
-import machine
-from machine import Pin
-from button import Button  # Import your Button class
-from IRTransmitter import IRTransmitter  # Import the IR Transmitter class
+import time
 
-# Configuration 
-PLAYER_NAME = "Player1"
-PLAYER_ID = 1  # Unique ID for this player
-WIFI_SSID = "Melmany"  # Your WiFi name
-WIFI_PASSWORD = "Melmansan2012"  # Your WiFi password
-SERVER_IP = "192.168.1.221"  # Your server's IP address
-SERVER_PORT = 9999
+# Configure logging
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+)
 
-# Global variables
-connected = False
-sock = None
+# -------------------- Modern Rounded Button --------------------
+class ModernRoundedButton(Button):
+    border_radius = ListProperty([12])
+    
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
+        self.background_normal = ''
+        self.background_color = (0, 0, 0, 0)
+        self.font_size = 16
+        self.bold = True
+        self.height = 40
+        self.bind(pos=self.update_canvas, size=self.update_canvas)
 
-# Setup hardware
-button_pin = 16  # Pin for the button
-status_led_pin = 15  # Pin for status LED
-ir_led_pin = 14  # Pin for IR LED transmitter
-shoot_led_pin = 13  # Pin for visible LED that shows when IR is active
+    def update_canvas(self, *args):
+        self.canvas.before.clear()
+        with self.canvas.before:
+            Color(0, 0, 0, 0.2)
+            RoundedRectangle(pos=(self.pos[0]+2, self.pos[1]-2), size=self.size, radius=self.border_radius)
+            Color(*self.background_color)
+            RoundedRectangle(pos=self.pos, size=self.size, radius=self.border_radius)
 
-# Define your custom class first before using it
-class CustomIRTransmitter(IRTransmitter):
-    """Extended IR Transmitter with visible LED indication"""
-    
-    def __init__(self, pin, led_pin=None, frequency=38000):
-        """
-        Initialize the IR transmitter with visible LED indicator.
-        
-        :param pin: GPIO pin number the IR LED is connected to
-        :param led_pin: GPIO pin for visible LED (None if not used)
-        :param frequency: IR carrier frequency in Hz (default: 38kHz)
-        """
-        super().__init__(pin, frequency)
-        
-        # Set up visible LED if provided
-        self.led_pin = None
-        if led_pin is not None:
-            self.led_pin = Pin(led_pin, Pin.OUT)
-            self.led_pin.value(0)  # Make sure LED is off initially
-    
-    def _carrier_on(self):
-        """Turn on the IR carrier signal and visible LED"""
-        if self.pwm:
-            self.pwm.duty_u16(32768)  # 50% duty cycle
-        
-        # Also turn on visible LED if available
-        if self.led_pin:
-            self.led_pin.value(1)
-    
-    def _carrier_off(self):
-        """Turn off the IR carrier signal and visible LED"""
-        if self.pwm:
-            self.pwm.duty_u16(0)
-        
-        # Also turn off visible LED if available
-        if self.led_pin:
-            self.led_pin.value(0)
-
-def flash_led(count, duration):
-    """Flash the status LED"""
-    for _ in range(count):
-        status_led.value(1)
-        time.sleep(duration)
-        status_led.value(0)
-        time.sleep(duration)
-
-def connect_wifi():
-    """Connect to WiFi network"""
-    wlan = network.WLAN(network.STA_IF)
-    wlan.active(True)
-    
-    print(f"Connecting to {WIFI_SSID}...")
-    wlan.connect(WIFI_SSID, WIFI_PASSWORD)
-    
-    # Wait for connection with timeout
-    max_wait = 10
-    while max_wait > 0:
-        if wlan.status() < 0 or wlan.status() >= 3:
-            break
-        max_wait -= 1
-        print("Waiting for connection...")
-        time.sleep(1)
-    
-    if wlan.status() != 3:
-        print("Network connection failed")
-        return False
-    
-    status = wlan.ifconfig()
-    print(f"Connected to WiFi. IP: {status[0]}")
-    return True
-
-def connect_to_server():
-    """Connect to the game server"""
-    global connected, sock
-    try:
-        addr = socket.getaddrinfo(SERVER_IP, SERVER_PORT)[0][-1]
-        sock = socket.socket()
-        # Socket is set to blocking mode by default
-        sock.connect(addr)
-        print("Connected to server")
-        
-        # Set connected flag
-        connected = True
-        
-        # Register with server
-        message = {
-            "type": "register",
-            "player_name": PLAYER_NAME,
-            "player_id": PLAYER_ID
+# -------------------- Complete Game Server --------------------
+class GameServer:
+    def __init__(self, gui_callback, host='0.0.0.0', port=9999):
+        self.gui_callback = gui_callback
+        self.host = host
+        self.port = port
+        self.server_socket = None
+        self.running = False
+        self.clients = {}  # {client_id: (socket, addr)}
+        self.player_names = {}  # {client_id: player_name}
+        self.lock = threading.Lock()
+        self.game_state = {
+            'max_players': 4,
+            'game_duration': 300,
+            'active_players': [],
+            'is_running': False,
+            'is_paused': False,
+            'remaining_time': 300,
+            'start_time': None,
+            'pause_time': None,
+            'elapsed_before_pause': 0
         }
+        self.timer_thread = None
+        self.connection_thread = None
         
-        json_message = json.dumps(message).encode('utf-8')
-        sock.send(json_message)
-        print("Registration message sent to server")
-        
-        return True
-    except Exception as e:
-        print(f"Server connection failed: {e}")
-        connected = False
-        return False
-
-def shoot():
-    """Send a shoot message and IR signal"""
-    global connected, sock
-    
-    print("Shooting!")
-    
-    # Create a quick pulse effect on the shoot LED
-    for _ in range(3):  # Flash 3 times quickly
-        shoot_led.value(1)
-        time.sleep(0.05)
-        shoot_led.value(0)
-        time.sleep(0.05)
-    
-    # 1. Transmit IR signal with player ID
-    shoot_led.value(1)  # Keep LED on during transmission
-    ir_success = ir_transmitter.send_code(PLAYER_ID)
-    time.sleep(0.1)  # Keep lit briefly after transmission
-    shoot_led.value(0)
-    
-    if ir_success:
-        print("IR signal transmitted")
-    else:
-        print("Failed to transmit IR signal")
-    
-    # Rest of the function unchanged
-    # 2. Send message to server if connected
-    if connected and sock:
-        message = {
-            "type": "shoot",
-            "player_name": PLAYER_NAME,
-            "player_id": PLAYER_ID
-        }
-        
+    def log(self, message, level='info'):
+        getattr(logging, level)(message)
         try:
-            json_message = json.dumps(message).encode('utf-8')
-            print("Sending shoot message to server:", message)
-            
-            # Send the data
-            bytes_sent = sock.send(json_message)
-            
-            # Flash status LED to confirm
-            flash_led(1, 0.1)
-            
+            # Use Clock to ensure this runs in the main thread
+            Clock.schedule_once(lambda dt: self.gui_callback(f"[SERVER] {message}"), 0)
+        except Exception as e:
+            logging.error(f"Error in log callback: {str(e)}")
+
+    def start_server(self):
+        try:
+            if self.running:
+                self.log("Server already running", 'warning')
+                return
+
+            self.server_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            self.server_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            self.server_socket.bind((self.host, self.port))
+            self.server_socket.listen(5)
+            self.running = True
+            self.connection_thread = threading.Thread(target=self.accept_connections, daemon=True)
+            self.connection_thread.start()
+            self.log(f"Server started on {self.host}:{self.port}")
             return True
         except Exception as e:
-            print(f"Send error: {e}")
-            connected = False
+            self.log(f"Server start failed: {str(e)}", 'error')
             return False
-    else:
-        print("Not connected to server - local IR shooting only")
-        # Still flash status LED to confirm shot
-        flash_led(1, 0.1)
-        return ir_success
-last_shoot_time = 0
 
-# Initialize components
-button = Button(button_pin, rest_state=False, internal_pulldown=True)
-status_led = Pin(status_led_pin, Pin.OUT)
-shoot_led = Pin(shoot_led_pin, Pin.OUT)  # LED to indicate shooting
-ir_transmitter = CustomIRTransmitter(ir_led_pin, shoot_led_pin)
+    def accept_connections(self):
+        self.server_socket.settimeout(1)
+        while self.running:
+            try:
+                client_socket, addr = self.server_socket.accept()
+                client_id = f"{addr[0]}:{addr[1]}"
+                with self.lock:
+                    if len(self.game_state['active_players']) >= self.game_state['max_players']:
+                        client_socket.send(json.dumps({
+                            "type": "error",
+                            "message": "Server full"
+                        }).encode())
+                        client_socket.close()
+                        self.log(f"Rejected connection (max players reached): {client_id}", 'warning')
+                        continue
+                    
+                    # Add to clients with temporary name
+                    self.clients[client_id] = (client_socket, addr)
+                    temp_name = f"Player_{client_id[-4:]}"
+                    self.player_names[client_id] = temp_name
+                    self.game_state['active_players'].append(temp_name)
+                
+                self.log(f"New connection: {client_id}")
+                # Notify UI to update player list
+                Clock.schedule_once(lambda dt: self.gui_callback(f"PLAYER_JOINED:{temp_name}"), 0)
+                
+                threading.Thread(target=self.handle_client, args=(client_socket, client_id), daemon=True).start()
+            except socket.timeout:
+                continue
+            except Exception as e:
+                if self.running:
+                    self.log(f"Connection error: {str(e)}", 'error')
 
-# Main executionprint("Starting Laser Tag client...")
+    def handle_client(self, client_socket, client_id):
+        try:
+            while self.running:
+                data = client_socket.recv(1024)
+                if not data:
+                    break
+                
+                try:
+                    message = json.loads(data.decode())
+                    self.process_message(message, client_id, client_socket)
+                except json.JSONDecodeError:
+                    self.log(f"Invalid message from {client_id}", 'warning')
+        except Exception as e:
+            self.log(f"Client error {client_id}: {str(e)}", 'warning')
+        finally:
+            self.disconnect_client(client_id)
 
-# Connect to WiFi
-if not connect_wifi():
-    # Blink LED to show wifi connection error
-    while True:
-        flash_led(1, 0.5)
-        time.sleep(0.5)
-
-# Connect to server
-if not connect_to_server():
-    # Blink LED differently to show server connection error
-    while True:
-        flash_led(2, 0.2)
-        time.sleep(1)
-
-# Flash LED to show we're ready
-flash_led(3, 0.2)
-
-# Main loop - check button and send shoot message
-print("Ready! Press the button to shoot.")
-
-try:
-    while True:
-        # Update button state using your Button class's update method
-        button.update()
+    def process_message(self, message, client_id, client_socket):
+        msg_type = message.get('type')
+        if msg_type == 'register':
+            # Existing code for handling 'register' messages
+            player_name = message.get('player_name', f"Player_{client_id[-4:]}")
+            with self.lock:
+                if len(self.game_state['active_players']) >= self.game_state['max_players']:
+                    response = {"type": "registration_failed", "reason": "server_full"}
+                    client_socket.send(json.dumps(response).encode())
+                    self.log(f"{player_name} tried to join but server is full", 'warning')
+                else:
+                    # Update player name
+                    old_name = self.player_names.get(client_id, "")
+                    if old_name in self.game_state['active_players']:
+                        self.game_state['active_players'].remove(old_name)
+                    
+                    self.player_names[client_id] = player_name
+                    self.game_state['active_players'].append(player_name)
+                    
+                    response = {"type": "welcome", "player_id": client_id}
+                    client_socket.send(json.dumps(response).encode())
+                    self.log(f"{player_name} joined the game")
+                    
+                    # Notify UI to update player list
+                    if old_name:
+                        Clock.schedule_once(lambda dt: self.gui_callback(f"PLAYER_LEFT:{old_name}"), 0)
+                    Clock.schedule_once(lambda dt: self.gui_callback(f"PLAYER_JOINED:{player_name}"), 0)
         
-        # Check if button is active (pressed) using your Button class's read method
-        if button.read():
-            # Get current time
-            current_time = time.time()
+        # Add this new elif block to handle shoot messages
+        elif msg_type == 'shoot':
+            player_name = self.player_names.get(client_id, f"Player_{client_id[-4:]}")
+            player_id = message.get('player_id', 'unknown')
+            self.log(f"SHOOT: {player_name} (ID: {player_id}) fired their weapon!")
+
+    def start_game(self):
+        with self.lock:
+            if not self.game_state['is_running']:
+                self.game_state['is_running'] = True
+                self.game_state['is_paused'] = False
+                self.game_state['remaining_time'] = self.game_state['game_duration']
+                self.game_state['start_time'] = time.time()
+                self.game_state['elapsed_before_pause'] = 0
+                self.log("Game started!")
+                
+                # Start timer in a separate thread
+                if self.timer_thread is None or not self.timer_thread.is_alive():
+                    self.timer_thread = threading.Thread(target=self._run_timer, daemon=True)
+                    self.timer_thread.start()
+                return True
+            return False
+
+    def stop_game(self):
+        with self.lock:
+            was_running = self.game_state['is_running']
+            self.game_state['is_running'] = False
+            self.game_state['is_paused'] = False
+            self.game_state['remaining_time'] = 0
+            self.game_state['elapsed_before_pause'] = 0
             
-            # Only shoot if enough time has passed since the last shot
-            if current_time - last_shoot_time > 0.5:  # 500ms debounce period
-                print("Button pressed! Shooting...")
-                shoot()
-                # Update the last shoot time
-                last_shoot_time = current_time
+            if was_running:
+                self.log("Game stopped")
+                return True
+            return False
+
+    def pause_game(self):
+        with self.lock:
+            if not self.game_state['is_running']:
+                return False
+                
+            if not self.game_state['is_paused']:
+                # Pausing
+                self.game_state['is_paused'] = True
+                self.game_state['pause_time'] = time.time()
+                # Calculate elapsed time before pause
+                elapsed = int(time.time() - self.game_state['start_time'])
+                self.game_state['elapsed_before_pause'] = elapsed
+                self.log("Game paused")
+                return True
             else:
-                print("Button press ignored (debounce)")
+                # Resuming
+                self.game_state['is_paused'] = False
+                # Set a new start time that accounts for the paused duration
+                current_time = time.time()
+                self.game_state['start_time'] = current_time - self.game_state['elapsed_before_pause']
+                self.log("Game resumed")
+                return True
+
+    def _run_timer(self):
+        last_update = time.time()
         
-        # Small delay to prevent 100% CPU usage
-        time.sleep(0.01)
-except Exception as e:
-    print(f"Error in main loop: {e}")
+        while self.game_state['is_running'] and self.game_state['remaining_time'] > 0:
+            now = time.time()
+            if now - last_update >= 1:
+                last_update = now
+                
+                with self.lock:
+                    if not self.game_state['is_paused']:
+                        elapsed = int(now - self.game_state['start_time'])
+                        self.game_state['remaining_time'] = max(0, self.game_state['game_duration'] - elapsed)
+            
+            time.sleep(0.1)  # Small delay to prevent CPU hogging
+        
+        # Game ended
+        with self.lock:
+            if self.game_state['is_running']:
+                self.game_state['is_running'] = False
+                self.game_state['is_paused'] = False
+                self.log("Game over - time's up!")
+
+    def kick_player(self, player_name):
+        """Kick a player from the server"""
+        try:
+            logging.info(f"GameServer attempting to kick player: {player_name}")
+            with self.lock:
+                if player_name in self.game_state['active_players']:
+                    # Find the client ID
+                    client_id_to_kick = None
+                    for client_id, name in list(self.player_names.items()):
+                        if name == player_name:
+                            client_id_to_kick = client_id
+                            break
+                    
+                    if client_id_to_kick and client_id_to_kick in self.clients:
+                        try:
+                            # We'll use our own method to log
+                            self.log(f"Kicking player {player_name}")
+                            self.disconnect_client(client_id_to_kick)
+                            return True
+                        except Exception as e:
+                            self.log(f"Error disconnecting client: {str(e)}", 'error')
+                            return False
+                    else:
+                        self.log(f"Player {player_name} not found in clients list", 'warning')
+                        # Clean up anyway
+                        if player_name in self.game_state['active_players']:
+                            self.game_state['active_players'].remove(player_name)
+                        return True
+                else:
+                    self.log(f"Player {player_name} not found in active players", 'warning')
+                    return False
+        except Exception as e:
+            logging.error(f"Error in GameServer kick_player: {str(e)}")
+            try:
+                self.log(f"Error kicking player: {str(e)}", 'error')
+            except:
+                logging.error("Failed to log after kick error")
+            return False
+
+    def disconnect_client(self, client_id):
+        try:
+            with self.lock:
+                if client_id in self.clients:
+                    player_name = self.player_names.get(client_id)
+                    
+                    try:
+                        client_socket, _ = self.clients[client_id]
+                        client_socket.close()
+                    except Exception as e:
+                        self.log(f"Error closing client socket: {str(e)}", 'error')
+                    
+                    # Remove from active players list if present
+                    if player_name and player_name in self.game_state['active_players']:
+                        try:
+                            self.game_state['active_players'].remove(player_name)
+                        except Exception as e:
+                            self.log(f"Error removing player from active list: {str(e)}", 'error')
+                    
+                    # Remove from clients and player_names dictionaries
+                    try:
+                        del self.clients[client_id]
+                    except Exception as e:
+                        self.log(f"Error removing client: {str(e)}", 'error')
+                        
+                    try:
+                        if client_id in self.player_names:
+                            del self.player_names[client_id]
+                    except Exception as e:
+                        self.log(f"Error removing player name: {str(e)}", 'error')
+                    
+                    if player_name:
+                        self.log(f"Client disconnected: {player_name}")
+                        # Notify UI through Clock to ensure it runs on the main thread
+                        Clock.schedule_once(lambda dt: self.gui_callback(f"PLAYER_LEFT:{player_name}"), 0)
+        except Exception as e:
+            self.log(f"Disconnect client error: {str(e)}", 'error')
+
+    def shutdown(self):
+        if self.running:
+            self.running = False
+            if self.game_state['is_running']:
+                self.stop_game()
+                
+            # Close all client connections
+            with self.lock:
+                for client_id, (sock, _) in list(self.clients.items()):
+                    try:
+                        sock.close()
+                    except:
+                        pass
+                self.clients.clear()
+                self.player_names.clear()
+                
+            # Close server socket
+            if self.server_socket:
+                try:
+                    self.server_socket.close()
+                except:
+                    pass
+            self.log("Server shutdown complete")
+            return True
+        return False
+
+    def get_active_players(self):
+        """Return a list of currently active players"""
+        with self.lock:
+            return list(self.game_state['active_players'])
+
+# -------------------- GUI Implementation --------------------
+class ServerGUI(BoxLayout):
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
+        self.orientation = "vertical"
+        self.padding = 20
+        self.spacing = 15
+        Window.clearcolor = (0.12, 0.12, 0.14, 1)
+        
+        # UI Components
+        self.add_widget(Label(text="LASER TAG SERVER", font_size=24, bold=True, color=(0.9, 0.9, 0.9, 1)))
+        self.setup_server_controls()
+        self.setup_game_controls()
+        self.setup_player_list()
+        self.setup_console()
+        
+        # Initialize server - MOVED AFTER UI SETUP!
+        self.server = GameServer(self.handle_server_message)
+        
+        # Timer updates
+        Clock.schedule_interval(self.update_timer_display, 0.5)
+
+    def handle_server_message(self, message):
+        """Process messages from the server thread"""
+        try:
+            if message.startswith("PLAYER_JOINED:"):
+                player_name = message.split(":", 1)[1]
+                # Use Clock to ensure UI operations happen on the main thread
+                Clock.schedule_once(lambda dt: self.add_player_to_list(player_name), 0)
+                self.update_status(f"Player {player_name} joined")
+            elif message.startswith("PLAYER_LEFT:"):
+                player_name = message.split(":", 1)[1]
+                # Use Clock to ensure UI operations happen on the main thread
+                Clock.schedule_once(lambda dt: self.remove_player_from_list(player_name), 0)
+                self.update_status(f"Player {player_name} left")
+            else:
+                self.update_status(message)
+        except Exception as e:
+            logging.error(f"Error handling server message: {str(e)}")
+
+    def setup_server_controls(self):
+        controls = BoxLayout(size_hint_y=None, height=50)
+        self.start_btn = ModernRoundedButton(
+            text="START SERVER", 
+            background_color=(0, 0.8, 0, 1)
+        )
+        self.start_btn.bind(on_press=self.start_server)
+        
+        self.stop_btn = ModernRoundedButton(
+            text="STOP SERVER", 
+            background_color=(0.9, 0, 0, 1),
+            disabled=True
+        )
+        self.stop_btn.bind(on_press=self.stop_server)
+        
+        controls.add_widget(self.start_btn)
+        controls.add_widget(self.stop_btn)
+        self.add_widget(controls)
+
+    def start_server(self, instance):
+        if not self.server.running:
+            success = self.server.start_server()
+            if success:
+                self.start_btn.disabled = True
+                self.stop_btn.disabled = False
+                self.update_status("Server started successfully")
+                self.enable_game_controls(True)
+
+    def stop_server(self, instance):
+        if self.server.running:
+            success = self.server.shutdown()
+            if success:
+                self.start_btn.disabled = False
+                self.stop_btn.disabled = True
+                self.update_status("Server stopped")
+                self.enable_game_controls(False)
+                # Clear player list
+                self.player_list_container.clear_widgets()
+
+    def enable_game_controls(self, enabled):
+        """Enable or disable game controls"""
+        self.game_start_btn.disabled = not enabled
+        self.pause_btn.disabled = not enabled or not self.server.game_state['is_running']
+        self.game_stop_btn.disabled = not enabled or not self.server.game_state['is_running']
+
+    def setup_game_controls(self):
+        # Game configuration
+        config_grid = GridLayout(cols=2, spacing=10, size_hint_y=None, height=80)
+        
+        # Max Players
+        config_grid.add_widget(Label(text="Max Players:", color=(0.9, 0.9, 0.9, 1)))
+        self.max_players = Spinner(
+            text="4", 
+            values=["2", "4", "6", "8"],
+            background_color=(0.25, 0.25, 0.3, 1)
+        )
+        self.max_players.bind(text=self.update_max_players)
+        config_grid.add_widget(self.max_players)
+
+        # Game Duration
+        config_grid.add_widget(Label(text="Game Time (s):", color=(0.9, 0.9, 0.9, 1)))
+        self.game_duration = TextInput(
+            text="300",
+            input_filter='int',
+            background_color=(0.25, 0.25, 0.3, 1)
+        )
+        self.game_duration.bind(text=self.update_game_duration)
+        config_grid.add_widget(self.game_duration)
+
+        self.add_widget(config_grid)
+
+        # Game controls
+        game_btns = GridLayout(cols=3, spacing=10, size_hint_y=None, height=50)
+        
+        self.game_start_btn = ModernRoundedButton(
+            text="START GAME", 
+            background_color=(0, 0.8, 0, 1),
+            disabled=True
+        )
+        self.game_start_btn.bind(on_press=self.start_game)
+        
+        self.pause_btn = ModernRoundedButton(
+            text="PAUSE", 
+            background_color=(0.9, 0.6, 0, 1),
+            disabled=True
+        )
+        self.pause_btn.bind(on_press=self.toggle_pause)
+        
+        self.game_stop_btn = ModernRoundedButton(
+            text="STOP GAME", 
+            background_color=(0.9, 0, 0, 1),
+            disabled=True
+        )
+        self.game_stop_btn.bind(on_press=self.stop_game)
+        
+        game_btns.add_widget(self.game_start_btn)
+        game_btns.add_widget(self.pause_btn)
+        game_btns.add_widget(self.game_stop_btn)
+        self.add_widget(game_btns)
+
+        # Timer display
+        timer_box = BoxLayout(size_hint_y=None, height=50)
+        timer_box.add_widget(Label(text="TIME LEFT:", color=(0.9, 0.9, 0.9, 1)))
+        self.timer_text = Label(
+            text="00:00", 
+            font_size=24, 
+            color=(0.2, 0.8, 0.2, 1),
+            size_hint_x=0.7
+        )
+        timer_box.add_widget(self.timer_text)
+        self.add_widget(timer_box)
+        
+    def setup_player_list(self):
+        # Player list section
+        player_section = BoxLayout(orientation='vertical', size_hint_y=0.3)
+        player_section.add_widget(Label(text="CONNECTED PLAYERS", font_size=18, bold=True))
+        
+        # Scrollable container for player list
+        player_scroll = ScrollView()
+        self.player_list_container = GridLayout(cols=1, spacing=2, size_hint_y=None)
+        self.player_list_container.bind(minimum_height=self.player_list_container.setter('height'))
+        player_scroll.add_widget(self.player_list_container)
+        player_section.add_widget(player_scroll)
+        
+        self.add_widget(player_section)
+
+    def setup_console(self):
+        console_box = BoxLayout(orientation='vertical', size_hint_y=0.3)
+        console_box.add_widget(Label(text="SERVER CONSOLE", font_size=18, bold=True))
+        
+        self.console = ScrollView()
+        self.console_text = TextInput(
+            readonly=True,
+            background_color=(0.05, 0.05, 0.1, 1),
+            foreground_color=(0, 0.9, 0, 1),
+            size_hint_y=None,
+            height=200,  # Set a fixed initial height
+            multiline=True,
+            font_size=14
+        )
+        self.console_text.bind(minimum_height=self.console_text.setter('height'))
+        self.console.add_widget(self.console_text)
+        console_box.add_widget(self.console)
+        
+        self.add_widget(console_box)
+
+    def add_player_to_list(self, player_name):
+        """Add a player to the UI list"""
+        try:
+            player_item = BoxLayout(size_hint_y=None, height=30)
+            
+            # Player name
+            player_item.add_widget(Label(text=player_name, color=(0.9, 0.9, 0.9, 1), size_hint_x=0.7))
+            
+            # Kick button
+            kick_btn = Button(
+                text="Kick", 
+                size_hint_x=0.3,
+                background_color=(0.8, 0.3, 0.1, 1)
+            )
+            kick_btn.player_name = player_name  # Store player name as a property
+            kick_btn.bind(on_release=self.kick_button_pressed)
+            player_item.add_widget(kick_btn)
+            
+            self.player_list_container.add_widget(player_item)
+            logging.info(f"Added player {player_name} to UI list")
+        except Exception as e:
+            logging.error(f"Error adding player to list: {str(e)}")
+
+    def remove_player_from_list(self, player_name):
+        try:
+            children_to_remove = []
+            for child in list(self.player_list_container.children):
+                try:
+                    if isinstance(child, BoxLayout):
+                        for widget in child.children:
+                            if isinstance(widget, Label) and widget.text == player_name:
+                                children_to_remove.append(child)
+                                break
+                except Exception as e:
+                    logging.error(f"Error checking player widget: {str(e)}")
+            
+            for child in children_to_remove:
+                try:
+                    self.player_list_container.remove_widget(child)
+                except Exception as e:
+                    logging.error(f"Error removing player widget: {str(e)}")
+        except Exception as e:
+            logging.error(f"Error in remove_player_from_list: {str(e)}")
+
+    def kick_player(self, player_name):
+        """Kick a player when kick button is clicked"""
+        if self.server.kick_player(player_name):
+            self.update_status(f"Player {player_name} has been kicked")
+        else:
+            self.update_status(f"Failed to kick player {player_name}")
+
+    def kick_button_pressed(self, instance):
+        """Handle kick button press with safe access to player name"""
+        try:
+            player_name = getattr(instance, 'player_name', None)
+            if player_name:
+                logging.info(f"Kick button pressed for player: {player_name}")
+                # Create a delay to ensure UI remains responsive
+                Clock.schedule_once(lambda dt: self.kick_player(player_name), 0.1)
+        except Exception as e:
+            logging.error(f"Error in kick button handler: {str(e)}")
+            self.update_status(f"Error in kick button: {str(e)}")
+
+    def update_max_players(self, instance, value):
+        try:
+            max_players = int(value)
+            self.server.game_state['max_players'] = max_players
+            self.update_status(f"Max players set to {max_players}")
+        except ValueError:
+            self.update_status("Invalid max players value", 'warning')
+
+    def update_game_duration(self, instance, value):
+        try:
+            if value.strip():
+                duration = int(value)
+                self.server.game_state['game_duration'] = duration
+                if not self.server.game_state['is_running']:
+                    self.server.game_state['remaining_time'] = duration
+                self.update_status(f"Game duration set to {duration}s")
+        except ValueError:
+            self.update_status("Invalid game duration", 'warning')
+
+    def start_game(self, instance):
+        """Start the game"""
+        if self.server.start_game():
+            self.pause_btn.disabled = False
+            self.game_stop_btn.disabled = False
+            self.update_status("Game started")
+
+    def toggle_pause(self, instance):
+        """Toggle game pause state"""
+        if self.server.pause_game():
+            if self.server.game_state['is_paused']:
+                self.pause_btn.text = "RESUME"
+                self.pause_btn.background_color = (0, 0.7, 0.3, 1)
+            else:
+                self.pause_btn.text = "PAUSE"
+                self.pause_btn.background_color = (0.9, 0.6, 0, 1)
+
+    def stop_game(self, instance):
+        """Stop the game"""
+        if self.server.stop_game():
+            self.pause_btn.text = "PAUSE"
+            self.pause_btn.background_color = (0.9, 0.6, 0, 1)
+            self.pause_btn.disabled = True
+            self.game_stop_btn.disabled = True
+            self.update_status("Game stopped")
+
+    def update_timer_display(self, dt):
+        """Update the timer display"""
+        try:
+            minutes = self.server.game_state['remaining_time'] // 60
+            seconds = self.server.game_state['remaining_time'] % 60
+            self.timer_text.text = f"{minutes:02d}:{seconds:02d}"
+            
+            # Update timer color based on remaining time
+            if self.server.game_state['remaining_time'] <= 30:
+                self.timer_text.color = (0.9, 0.2, 0.2, 1)
+            elif self.server.game_state['remaining_time'] <= 60:
+                self.timer_text.color = (0.9, 0.7, 0.2, 1)
+            else:
+                self.timer_text.color = (0.2, 0.8, 0.2, 1)
+                
+            # Add blinking effect when paused
+            if self.server.game_state['is_paused']:
+                if int(time.time()) % 2 == 0:  # Blink every second
+                    self.timer_text.opacity = 0.5
+                else:
+                    self.timer_text.opacity = 1.0
+            else:
+                self.timer_text.opacity = 1.0
+                
+            # Update game control buttons based on game state
+            if not self.server.running:
+                self.game_start_btn.disabled = True
+                self.pause_btn.disabled = True
+                self.game_stop_btn.disabled = True
+            else:
+                self.game_start_btn.disabled = self.server.game_state['is_running']
+                self.pause_btn.disabled = not self.server.game_state['is_running']
+                self.game_stop_btn.disabled = not self.server.game_state['is_running']
+        except Exception as e:
+            logging.error(f"Error updating timer: {str(e)}")
+
+    def update_status(self, message, level='info'):
+        """Update the console with a new status message"""
+        try:
+            timestamp = datetime.now().strftime("%H:%M:%S")
+            
+            # Format the message with timestamp and level
+            level_prefix = ""
+            if level == 'warning':
+                level_prefix = "[WARNING] "
+            elif level == 'error':
+                level_prefix = "[ERROR] "
+                
+            # Add the message to the console
+            formatted_msg = f"[{timestamp}] {level_prefix}{message}\n"
+            self.console_text.text += formatted_msg
+            
+            # Auto-scroll to the bottom
+            self.console_text.cursor = (len(self.console_text.text), 0)
+        except Exception as e:
+            logging.error(f"Error updating console: {str(e)}")
+
+# -------------------- Main App Class --------------------
+class LaserTagServerApp(App):
+    def build(self):
+        return ServerGUI()
+
+# -------------------- Run the Application --------------------
+if __name__ == "__main__":
+    try:
+        # Configure logging
+        logging.basicConfig(
+            level=logging.INFO,
+            format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+        )
+        LaserTagServerApp().run()
+    except Exception as e:
+        logging.error(f"Application error: {str(e)}")
