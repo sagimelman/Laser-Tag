@@ -6,6 +6,7 @@ import machine
 from machine import Pin
 from button import Button  # Import your Button class
 from IRTransmitter import IRTransmitter  # Import the IR Transmitter class
+from IRReceiver import IRReceiver  # Import the IR Receiver class
 
 # Configuration 
 PLAYER_NAME = "Player1"
@@ -14,16 +15,21 @@ WIFI_SSID = "Melmany"  # Your WiFi name
 WIFI_PASSWORD = "Melmansan2012"  # Your WiFi password
 SERVER_IP = "192.168.1.221"  # Your server's IP address
 SERVER_PORT = 9999
+PLAYER_HEALTH = 3  # Start with 3 lives
+PLAYER_STATUS = "alive"  # Status: "alive" or "eliminated"
 
 # Global variables
 connected = False
 sock = None
+last_shoot_time = 0
+last_hit_time = 0  # For debouncing hit detection
 
 # Setup hardware
 button_pin = 16  # Pin for the button
 status_led_pin = 15  # Pin for status LED
 ir_led_pin = 14  # Pin for IR LED transmitter
 shoot_led_pin = 13  # Pin for visible LED that shows when IR is active
+ir_receiver_pin = 17  # Pin for IR receiver
 
 # Define your custom class first before using it
 class CustomIRTransmitter(IRTransmitter):
@@ -126,9 +132,79 @@ def connect_to_server():
         connected = False
         return False
 
+def update_health_display():
+    """Update visual feedback based on current health"""
+    if PLAYER_STATUS == "eliminated":
+        # Eliminated: rapid continuous flashing
+        for _ in range(10):  # Flash several times to indicate elimination
+            status_led.value(1)
+            time.sleep(0.1)
+            status_led.value(0)
+            time.sleep(0.1)
+    else:
+        # Show remaining health with LED flashes
+        for _ in range(PLAYER_HEALTH):
+            status_led.value(1)
+            time.sleep(0.2)
+            status_led.value(0)
+            time.sleep(0.2)
+
+def handle_server_messages():
+    """Non-blocking check for server messages"""
+    global PLAYER_HEALTH, PLAYER_STATUS, connected, sock
+    
+    if not connected or not sock:
+        return
+    
+    try:
+        # Check if data is available to read (non-blocking)
+        sock.setblocking(False)
+        try:
+            data = sock.recv(1024)
+            if data:
+                message = json.loads(data.decode('utf-8'))
+                print("Received from server:", message)
+                
+                if message.get('type') == 'health_update':
+                    PLAYER_HEALTH = message.get('health', PLAYER_HEALTH)
+                    print(f"Health updated: {PLAYER_HEALTH} lives remaining")
+                    update_health_display()
+                
+                elif message.get('type') == 'eliminated':
+                    PLAYER_STATUS = "eliminated"
+                    print("You have been eliminated!")
+                    update_health_display()
+                
+                elif message.get('type') == 'game_start':
+                    # Reset health when game starts
+                    PLAYER_HEALTH = 3
+                    PLAYER_STATUS = "alive"
+                    print("Game started! Health reset to full.")
+                    update_health_display()
+        except:
+            # No data available or connection issue
+            pass
+        
+        # Restore blocking mode
+        sock.setblocking(True)
+    except Exception as e:
+        print(f"Error reading from server: {e}")
+        connected = False
+
 def shoot():
     """Send a shoot message and IR signal"""
-    global connected, sock
+    global connected, sock, PLAYER_STATUS
+    
+    # Don't allow shooting if player is eliminated
+    if PLAYER_STATUS == "eliminated":
+        print("Cannot shoot - you are eliminated!")
+        # Flash LED pattern to indicate cannot shoot
+        for _ in range(2):
+            status_led.value(1)
+            time.sleep(0.05)
+            status_led.value(0)
+            time.sleep(0.05)
+        return False
     
     print("Shooting!")
     
@@ -150,7 +226,6 @@ def shoot():
     else:
         print("Failed to transmit IR signal")
     
-    # Rest of the function unchanged
     # 2. Send message to server if connected
     if connected and sock:
         message = {
@@ -179,15 +254,155 @@ def shoot():
         # Still flash status LED to confirm shot
         flash_led(1, 0.1)
         return ir_success
-last_shoot_time = 0
+
+def handle_hit(shooter_id):
+    """Handle being hit by another player"""
+    global connected, sock, last_hit_time, PLAYER_HEALTH, PLAYER_STATUS
+    
+    # Debounce hits - ignore multiple hits within 3 seconds
+    current_time = time.time()
+    if current_time - last_hit_time < 3.0:
+        print(f"Hit ignored (debounce): Player {shooter_id}")
+        return False
+    
+    # Update last hit time
+    last_hit_time = current_time
+    
+    print(f"HIT! You were shot by Player {shooter_id}")
+    
+    # Flash LED rapidly to indicate hit
+    for _ in range(5):
+        status_led.value(1)
+        time.sleep(0.1)
+        status_led.value(0)
+        time.sleep(0.1)
+    
+    # Only process hits if player is still alive
+    if PLAYER_STATUS == "eliminated":
+        print("Hit ignored: You are already eliminated")
+        return False
+    
+    # Send hit message to server if connected
+    if connected and sock:
+        message = {
+            "type": "hit",
+            "player_name": PLAYER_NAME,
+            "player_id": PLAYER_ID,
+            "shooter_id": shooter_id
+        }
+        
+        try:
+            json_message = json.dumps(message).encode('utf-8')
+            print("Sending hit message to server:", message)
+            
+            # Send the data
+            bytes_sent = sock.send(json_message)
+            return True
+        except Exception as e:
+            print(f"Send error: {e}")
+            connected = False
+            return False
+    else:
+        print("Not connected to server - local hit processing only")
+        # Handle local health tracking
+        PLAYER_HEALTH -= 1
+        if PLAYER_HEALTH <= 0:
+            PLAYER_STATUS = "eliminated"
+            print("You have been eliminated!")
+        else:
+            print(f"Health reduced to {PLAYER_HEALTH}")
+        
+        update_health_display()
+        return True
+def check_for_hits():
+    """Check if we've been hit by an IR signal"""
+    # Non-blocking check for IR signal
+    code = ir_receiver.receive_code(timeout=100)  # Short timeout for non-blocking
+    
+    if code is not None:
+        print(f"Received IR code: {code}")
+        
+        # Check if this is a valid player ID (e.g., between 1-8 for 8 players)
+        # Adjust the range based on how many players you have
+        if 1 <= code <= 8:  # Valid player IDs are 1-8
+            handle_hit(code)
+            return True
+        else:
+            print(f"Ignoring invalid player ID: {code}")
+    
+    return False
+
+
+def update_health_display():
+    """Update visual feedback based on current health"""
+    global PLAYER_HEALTH, PLAYER_STATUS, status_led
+    
+    if PLAYER_STATUS == "eliminated":
+        # Eliminated: rapid continuous flashing
+        for _ in range(10):  # Flash several times to indicate elimination
+            status_led.value(1)
+            time.sleep(0.1)
+            status_led.value(0)
+            time.sleep(0.1)
+    else:
+        # Show remaining health with LED flashes
+        for _ in range(PLAYER_HEALTH):
+            status_led.value(1)
+            time.sleep(0.2)
+            status_led.value(0)
+            time.sleep(0.2)
+
+def handle_server_messages():
+    """Non-blocking check for server messages"""
+    global PLAYER_HEALTH, PLAYER_STATUS, connected, sock
+    
+    if not connected or not sock:
+        return
+    
+    try:
+        # Check if data is available to read (non-blocking)
+        sock.setblocking(False)
+        try:
+            data = sock.recv(1024)
+            if data:
+                message = json.loads(data.decode('utf-8'))
+                print("Received from server:", message)
+                
+                if message.get('type') == 'health_update':
+                    PLAYER_HEALTH = message.get('health', PLAYER_HEALTH)
+                    print(f"Health updated: {PLAYER_HEALTH} lives remaining")
+                    update_health_display()
+                
+                elif message.get('type') == 'eliminated':
+                    PLAYER_STATUS = "eliminated"
+                    print("You have been eliminated!")
+                    update_health_display()
+                
+                elif message.get('type') == 'game_start':
+                    # Reset health when game starts
+                    PLAYER_HEALTH = 3
+                    PLAYER_STATUS = "alive"
+                    print("Game started! Health reset to full.")
+                    update_health_display()
+        except:
+            # No data available or connection issue
+            pass
+        
+        # Restore blocking mode
+        sock.setblocking(True)
+    except Exception as e:
+        print(f"Error reading from server: {e}")
+        connected = False
+
+
 
 # Initialize components
 button = Button(button_pin, rest_state=False, internal_pulldown=True)
 status_led = Pin(status_led_pin, Pin.OUT)
 shoot_led = Pin(shoot_led_pin, Pin.OUT)  # LED to indicate shooting
 ir_transmitter = CustomIRTransmitter(ir_led_pin, shoot_led_pin)
-
-# Main executionprint("Starting Laser Tag client...")
+ir_receiver = IRReceiver(ir_receiver_pin)  # Initialize IR receiver# Main execution
+print("Starting Laser Tag client...")
 
 # Connect to WiFi
 if not connect_wifi():
@@ -214,6 +429,9 @@ try:
         # Update button state using your Button class's update method
         button.update()
         
+        # Check for server messages
+        handle_server_messages()
+        
         # Check if button is active (pressed) using your Button class's read method
         if button.read():
             # Get current time
@@ -227,6 +445,9 @@ try:
                 last_shoot_time = current_time
             else:
                 print("Button press ignored (debounce)")
+        
+        # Check for hits from IR receiver
+        check_for_hits()
         
         # Small delay to prevent 100% CPU usage
         time.sleep(0.01)
