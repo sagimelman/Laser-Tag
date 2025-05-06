@@ -17,6 +17,9 @@ import threading
 import json
 import time
 
+PLAYER_HEALTH = 3  # Start with 3 lives
+PLAYER_STATUS = "alive"  # Status: "alive" or "eliminated"
+
 # Configure logging
 logging.basicConfig(
     level=logging.INFO,
@@ -51,7 +54,7 @@ class GameServer:
         self.host = host
         self.port = port
         self.server_socket = None
-        self.running = False
+        self.running = False  # This line is missing in your code
         self.clients = {}  # {client_id: (socket, addr)}
         self.player_names = {}  # {client_id: player_name}
         self.lock = threading.Lock()
@@ -66,6 +69,8 @@ class GameServer:
             'pause_time': None,
             'elapsed_before_pause': 0
         }
+        self.player_health = {}  # {player_name: health}
+        self.player_status = {}  # {player_name: "alive" or "eliminated"}
         self.timer_thread = None
         self.connection_thread = None
         
@@ -81,7 +86,7 @@ class GameServer:
         try:
             if self.running:
                 self.log("Server already running", 'warning')
-                return
+                return False
 
             self.server_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
             self.server_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
@@ -94,6 +99,34 @@ class GameServer:
             return True
         except Exception as e:
             self.log(f"Server start failed: {str(e)}", 'error')
+            return False
+
+    def reset_player_health(self):
+        """Reset all players' health to full (3 lives)"""
+        with self.lock:
+            for player_name in self.game_state['active_players']:
+                self.player_health[player_name] = 3
+                self.player_status[player_name] = "alive"
+            self.log("All players' health reset to full")
+    def start_game(self):
+        with self.lock:
+            if not self.game_state['is_running']:
+                self.game_state['is_running'] = True
+                self.game_state['is_paused'] = False
+                self.game_state['remaining_time'] = self.game_state['game_duration']
+                self.game_state['start_time'] = time.time()
+                self.game_state['elapsed_before_pause'] = 0
+                
+                # Add this line:
+                self.reset_player_health()
+                
+                self.log("Game started!")
+                
+                # Start timer in a separate thread
+                if self.timer_thread is None or not self.timer_thread.is_alive():
+                    self.timer_thread = threading.Thread(target=self._run_timer, daemon=True)
+                    self.timer_thread.start()
+                return True
             return False
 
     def accept_connections(self):
@@ -129,6 +162,8 @@ class GameServer:
                 if self.running:
                     self.log(f"Connection error: {str(e)}", 'error')
 
+
+
     def handle_client(self, client_socket, client_id):
         try:
             while self.running:
@@ -147,6 +182,7 @@ class GameServer:
             self.disconnect_client(client_id)
 
     def process_message(self, message, client_id, client_socket):
+        
         msg_type = message.get('type')
         if msg_type == 'register':
             # Existing code for handling 'register' messages
@@ -179,6 +215,62 @@ class GameServer:
             player_name = self.player_names.get(client_id, f"Player_{client_id[-4:]}")
             player_id = message.get('player_id', 'unknown')
             self.log(f"SHOOT: {player_name} (ID: {player_id}) fired their weapon!")
+            
+        # Add this new elif block to handle hit messages
+        elif msg_type == 'hit':
+            with self.lock:
+                player_name = self.player_names.get(client_id, f"Player_{client_id[-4:]}")
+                player_id = message.get('player_id', 'unknown')
+                shooter_id = message.get('shooter_id', 'unknown')
+                
+                # Find the shooter's name if possible
+                shooter_name = f"Player_{shooter_id}"
+                for cid, name in self.player_names.items():
+                    if shooter_id == cid:
+                        shooter_name = name
+                        break
+                
+                # Process hit only if game is running and not paused
+                if self.game_state['is_running'] and not self.game_state['is_paused']:
+                    # Check if player is still alive
+                    if player_name in self.player_health and self.player_status.get(player_name) == "alive":
+                        # Reduce health
+                        self.player_health[player_name] -= 1
+                        remaining_health = self.player_health[player_name]
+                        
+                        # Check if player is eliminated
+                        if remaining_health <= 0:
+                            self.player_status[player_name] = "eliminated"
+                            self.log(f"ELIMINATED: {player_name} has been eliminated from the game!")
+                            
+                            # Send elimination notification to client
+                            try:
+                                response = {
+                                    "type": "eliminated",
+                                    "message": "You have been eliminated!"
+                                }
+                                client_socket.send(json.dumps(response).encode())
+                            except Exception as e:
+                                self.log(f"Error sending elimination message: {str(e)}", 'error')
+                        else:
+                            self.log(f"HIT: {player_name} was hit by {shooter_name}! {remaining_health} lives remaining.")
+                            
+                            # Send health update to client
+                            try:
+                                response = {
+                                    "type": "health_update",
+                                    "health": remaining_health
+                                }
+                                client_socket.send(json.dumps(response).encode())
+                            except Exception as e:
+                                self.log(f"Error sending health update: {str(e)}", 'error')
+                    else:
+                        # Player already eliminated
+                        self.log(f"HIT IGNORED: {player_name} is already eliminated!")
+                else:
+                    # Game not running or paused
+                    self.log(f"HIT IGNORED: Game not active - {player_name} hit by {shooter_name}")
+
 
     def start_game(self):
         with self.lock:
@@ -682,7 +774,7 @@ class ServerGUI(BoxLayout):
                 self.timer_text.opacity = 1.0
                 
             # Update game control buttons based on game state
-            if not self.server.running:
+            if not hasattr(self.server, 'running') or not self.server.running:
                 self.game_start_btn.disabled = True
                 self.pause_btn.disabled = True
                 self.game_stop_btn.disabled = True
@@ -730,4 +822,3 @@ if __name__ == "__main__":
         LaserTagServerApp().run()
     except Exception as e:
         logging.error(f"Application error: {str(e)}")
-
