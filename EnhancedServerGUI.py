@@ -16,6 +16,7 @@ import socket
 import threading
 import json
 import time
+from encryptions import encrypt_message, decrypt_message
 
 # Configure logging
 logging.basicConfig(
@@ -113,10 +114,12 @@ class GameServer:
                         continue
                     
                     # Add to clients with temporary name
-                    self.clients[client_id] = (client_socket, addr)
-                    temp_name = f"Player_{client_id[-4:]}"
-                    self.player_names[client_id] = temp_name
-                    self.game_state['active_players'].append(temp_name)
+                    # Add to clients with temporary name
+                self.clients[client_id] = (client_socket, addr)
+                # Don't add display clients to player list yet
+                temp_name = f"Player_{client_id[-4:]}"
+                self.player_names[client_id] = temp_name
+# Only add to active players after we know it's not a display
                 
                 self.log(f"New connection: {client_id}")
                 # Notify UI to update player list
@@ -137,7 +140,8 @@ class GameServer:
                     break
                 
                 try:
-                    message = json.loads(data.decode())
+                    decrypted_data = decrypt_message(data)
+                    message = json.loads(decrypted_data.decode('utf-8'))
                     self.process_message(message, client_id, client_socket)
                 except json.JSONDecodeError:
                     self.log(f"Invalid message from {client_id}", 'warning')
@@ -154,7 +158,8 @@ class GameServer:
             with self.lock:
                 if len(self.game_state['active_players']) >= self.game_state['max_players']:
                     response = {"type": "registration_failed", "reason": "server_full"}
-                    client_socket.send(json.dumps(response).encode())
+                    self.send_encrypted_message(client_socket, response)
+
                     self.log(f"{player_name} tried to join but server is full", 'warning')
                 else:
                     # Update player name
@@ -194,6 +199,17 @@ class GameServer:
                 if self.timer_thread is None or not self.timer_thread.is_alive():
                     self.timer_thread = threading.Thread(target=self._run_timer, daemon=True)
                     self.timer_thread.start()
+                game_event = {
+                "type": "game_event",
+                "event": "game_started",
+                "remaining_time": self.game_state['remaining_time'],
+                "is_running": True
+            }
+            for client_id, (client_socket, addr) in list(self.clients.items()):
+                try:
+                    self.send_encrypted_message(client_socket, game_event)
+                except:
+                    pass
                 return True
             return False
 
@@ -207,6 +223,17 @@ class GameServer:
             
             if was_running:
                 self.log("Game stopped")
+                stop_event = {
+                "type": "game_event",
+                "event": "game_stopped", 
+                "remaining_time": 0,
+                "is_running": False
+            }
+            for client_id, (client_socket, addr) in list(self.clients.items()):
+                try:
+                    self.send_encrypted_message(client_socket, stop_event)
+                except:
+                    pass
                 return True
             return False
 
@@ -223,6 +250,21 @@ class GameServer:
                 elapsed = int(time.time() - self.game_state['start_time'])
                 self.game_state['elapsed_before_pause'] = elapsed
                 self.log("Game paused")
+                
+                # Broadcast pause to displays
+                pause_event = {
+                    "type": "game_event", 
+                    "event": "game_paused",
+                    "remaining_time": self.game_state['remaining_time'],
+                    "is_running": self.game_state['is_running'],
+                    "is_paused": self.game_state['is_paused']
+                }
+                for client_id, (client_socket, addr) in list(self.clients.items()):
+                    try:
+                        self.send_encrypted_message(client_socket, pause_event)
+                    except:
+                        pass
+                
                 return True
             else:
                 # Resuming
@@ -231,6 +273,21 @@ class GameServer:
                 current_time = time.time()
                 self.game_state['start_time'] = current_time - self.game_state['elapsed_before_pause']
                 self.log("Game resumed")
+                
+                # Broadcast resume to displays
+                resume_event = {
+                    "type": "game_event", 
+                    "event": "game_resumed",
+                    "remaining_time": self.game_state['remaining_time'],
+                    "is_running": self.game_state['is_running'],
+                    "is_paused": self.game_state['is_paused']
+                }
+                for client_id, (client_socket, addr) in list(self.clients.items()):
+                    try:
+                        self.send_encrypted_message(client_socket, resume_event)
+                    except:
+                        pass
+                
                 return True
 
     def _run_timer(self):
@@ -245,6 +302,19 @@ class GameServer:
                     if not self.game_state['is_paused']:
                         elapsed = int(now - self.game_state['start_time'])
                         self.game_state['remaining_time'] = max(0, self.game_state['game_duration'] - elapsed)
+
+                        if self.game_state['remaining_time'] % 5 == 0:
+                            timer_update = {
+                                "type": "game_update", 
+                                "remaining_time": self.game_state['remaining_time'],
+                                "is_running": self.game_state['is_running']
+                            }
+                            # Send to all display clients
+                            for client_id, (client_socket, addr) in list(self.clients.items()):
+                                try:
+                                    self.send_encrypted_message(client_socket, timer_update)
+                                except:
+                                    pass  # Ignore send errors
             
             time.sleep(0.1)  # Small delay to prevent CPU hogging
         
@@ -362,6 +432,18 @@ class GameServer:
         """Return a list of currently active players"""
         with self.lock:
             return list(self.game_state['active_players'])
+        
+
+    def send_encrypted_message(self, client_socket, message):
+        """Send encrypted message to client"""
+        try:
+            json_str = json.dumps(message)
+            encrypted_data = encrypt_message(json_str)
+            client_socket.send(encrypted_data)
+            return True
+        except Exception as e:
+            self.log(f"Send error: {e}", 'error')
+            return False
 
 # -------------------- GUI Implementation --------------------
 class ServerGUI(BoxLayout):

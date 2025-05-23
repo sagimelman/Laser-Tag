@@ -6,6 +6,7 @@ import machine
 from machine import Pin
 from button import Button  # Import your Button class
 from IRTransmitter import IRTransmitter  # Import the IR Transmitter class
+from encryptions import encrypt_message, decrypt_message
 
 # Configuration 
 PLAYER_NAME = "Player1"
@@ -117,7 +118,8 @@ def connect_to_server():
         }
         
         json_message = json.dumps(message).encode('utf-8')
-        sock.send(json_message)
+        encrypted_data = encrypt_message(json_message)
+        sock.send(encrypted_data)
         print("Registration message sent to server")
         
         return True
@@ -152,7 +154,8 @@ def shoot():
             print("Sending shoot message to server:", message)
             
             # Send the data
-            bytes_sent = sock.send(json_message)
+            encrypted_data = encrypt_message(json_message)
+            bytes_sent = sock.send(encrypted_data)
             
             # Flash status LED to confirm
             flash_led(1, 0.1)
