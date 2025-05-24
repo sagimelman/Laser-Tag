@@ -16,6 +16,7 @@ import socket
 import threading
 import json
 import time
+import sqlite3
 from encryptions import encrypt_message, decrypt_message
 
 # Configure logging
@@ -67,8 +68,64 @@ class GameServer:
             'pause_time': None,
             'elapsed_before_pause': 0
         }
+        
+        # ADD THIS - Game mechanics state
+        self.player_health = {}  # {player_name: health}
+        self.player_scores = {}  # {player_name: score}
+        self.player_status = {}  # {player_name: 'alive', 'dead', 'respawning'}
+        self.max_health = 3  # Players start with 3 health
+        
         self.timer_thread = None
         self.connection_thread = None
+        # Database setup
+        self.init_database()
+        self.log("Database initialized")
+        
+
+    def init_database(self):
+        """Initialize the SQLite database and create tables"""
+        try:
+            self.db_connection = sqlite3.connect('lasertag.db', check_same_thread=False)
+            self.db_connection.execute('''
+                CREATE TABLE IF NOT EXISTS games (
+                    game_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    date_time TEXT NOT NULL,
+                    duration INTEGER NOT NULL,
+                    player_count INTEGER NOT NULL,
+                    player_names TEXT NOT NULL
+                )
+            ''')
+            self.db_connection.commit()
+        except Exception as e:
+            self.log(f"Database initialization error: {str(e)}", 'error')
+
+    def save_game_to_database(self):
+        """Save the completed game to the database"""
+        try:
+            # Get current date and time
+            now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            
+            # Calculate actual game duration
+            if self.game_state['start_time']:
+                actual_duration = int(time.time() - self.game_state['start_time'] - self.game_state.get('elapsed_before_pause', 0))
+            else:
+                actual_duration = 0
+            
+            # Get player count and names
+            player_count = len(self.game_state['active_players'])
+            player_names = ",".join(self.game_state['active_players'])
+            
+            # Insert into database
+            self.db_connection.execute('''
+                INSERT INTO games (date_time, duration, player_count, player_names)
+                VALUES (?, ?, ?, ?)
+            ''', (now, actual_duration, player_count, player_names))
+            
+            self.db_connection.commit()
+            self.log(f"Game saved to database: {player_count} players, {actual_duration}s duration")
+            
+        except Exception as e:
+            self.log(f"Database save error: {str(e)}", 'error')
         
     def log(self, message, level='info'):
         getattr(logging, level)(message)
@@ -113,7 +170,6 @@ class GameServer:
                         self.log(f"Rejected connection (max players reached): {client_id}", 'warning')
                         continue
                     
-                    # Add to clients with temporary name
                     # Add to clients with temporary name
                 self.clients[client_id] = (client_socket, addr)
                 # Don't add display clients to player list yet
@@ -170,20 +226,121 @@ class GameServer:
                     self.player_names[client_id] = player_name
                     self.game_state['active_players'].append(player_name)
                     
+                    # ADD THIS - Initialize player game state
+                    self.player_health[player_name] = self.max_health
+                    self.player_scores[player_name] = 0
+                    self.player_status[player_name] = 'alive'
+                    
                     response = {"type": "welcome", "player_id": client_id}
                     client_socket.send(json.dumps(response).encode())
-                    self.log(f"{player_name} joined the game")
+                    self.log(f"{player_name} joined the game (Health: {self.max_health})")
                     
                     # Notify UI to update player list
                     if old_name:
                         Clock.schedule_once(lambda dt: self.gui_callback(f"PLAYER_LEFT:{old_name}"), 0)
                     Clock.schedule_once(lambda dt: self.gui_callback(f"PLAYER_JOINED:{player_name}"), 0)
         
-        # Add this new elif block to handle shoot messages
         elif msg_type == 'shoot':
             player_name = self.player_names.get(client_id, f"Player_{client_id[-4:]}")
             player_id = message.get('player_id', 'unknown')
             self.log(f"SHOOT: {player_name} (ID: {player_id}) fired their weapon!")
+
+        # ADD THIS - New hit detection processing
+        elif msg_type == 'hit_detected':
+            victim_name = message.get('victim_name', 'Unknown')
+            shooter_id = message.get('shooter_id', 0)
+            
+            # Find shooter name by ID
+            shooter_name = self.find_player_by_id(shooter_id)
+            
+            if shooter_name:
+                self.process_hit(shooter_name, victim_name)
+            else:
+                self.log(f"Hit detected but unknown shooter ID: {shooter_id}", 'warning')
+
+    # ADD THIS - New method to find player by ID
+    def find_player_by_id(self, player_id):
+        """Find player name by their player ID"""
+        # This assumes player IDs match the order they joined
+        # You might need to adjust this based on your ID system
+        try:
+            player_list = list(self.game_state['active_players'])
+            if 1 <= player_id <= len(player_list):
+                return player_list[player_id - 1]
+        except:
+            pass
+        return None
+
+    # ADD THIS - Core hit processing logic
+    def process_hit(self, shooter_name, victim_name):
+        """Process a hit between two players"""
+        with self.lock:
+            # Validate both players exist and are alive
+            if (victim_name not in self.player_status or 
+                shooter_name not in self.player_status or
+                self.player_status[victim_name] != 'alive' or
+                self.player_status[shooter_name] != 'alive'):
+                return
+            
+            # Process the hit
+            old_health = self.player_health[victim_name]
+            self.player_health[victim_name] -= 1
+            new_health = self.player_health[victim_name]
+            
+            # Update shooter's score
+            self.player_scores[shooter_name] += 10
+            
+            self.log(f"HIT! {shooter_name} shot {victim_name} (Health: {old_health} → {new_health})")
+            
+            # Check if player is eliminated
+            if new_health <= 0:
+                self.player_status[victim_name] = 'dead'
+                self.log(f"ELIMINATED! {victim_name} has been eliminated by {shooter_name}!")
+                
+                # Broadcast elimination
+                elimination_event = {
+                    "type": "player_eliminated",
+                    "victim": victim_name,
+                    "shooter": shooter_name,
+                    "shooter_score": self.player_scores[shooter_name]
+                }
+                self.broadcast_to_all_clients(elimination_event)
+            else:
+                # Broadcast hit event
+                hit_event = {
+                    "type": "player_hit",
+                    "victim": victim_name,
+                    "shooter": shooter_name,
+                    "victim_health": new_health,
+                    "shooter_score": self.player_scores[shooter_name]
+                }
+                self.broadcast_to_all_clients(hit_event)
+            
+            # Check win condition
+            alive_players = [p for p, status in self.player_status.items() if status == 'alive']
+            if len(alive_players) <= 1 and len(self.game_state['active_players']) > 1:
+                winner = alive_players[0] if alive_players else "No one"
+                self.log(f"GAME OVER! Winner: {winner}")
+                
+                # Broadcast game over
+                game_over_event = {
+                    "type": "game_over",
+                    "winner": winner,
+                    "final_scores": self.player_scores
+                }
+                self.broadcast_to_all_clients(game_over_event)
+                
+                # Stop the game
+                self.stop_game()
+
+    # ADD THIS - Broadcast messages to all connected clients
+    def broadcast_to_all_clients(self, message):
+        """Send a message to all connected clients"""
+        for client_id, (client_socket, addr) in list(self.clients.items()):
+            try:
+                self.send_encrypted_message(client_socket, message)
+            except Exception as e:
+                self.log(f"Broadcast error to {client_id}: {str(e)}", 'warning')
 
     def start_game(self):
         with self.lock:
@@ -193,23 +350,27 @@ class GameServer:
                 self.game_state['remaining_time'] = self.game_state['game_duration']
                 self.game_state['start_time'] = time.time()
                 self.game_state['elapsed_before_pause'] = 0
-                self.log("Game started!")
+                
+                # ADD THIS - Reset all players for new game
+                for player_name in self.game_state['active_players']:
+                    self.player_health[player_name] = self.max_health
+                    self.player_scores[player_name] = 0
+                    self.player_status[player_name] = 'alive'
+                
+                self.log("Game started! All players reset to full health.")
                 
                 # Start timer in a separate thread
                 if self.timer_thread is None or not self.timer_thread.is_alive():
                     self.timer_thread = threading.Thread(target=self._run_timer, daemon=True)
                     self.timer_thread.start()
+                    
                 game_event = {
-                "type": "game_event",
-                "event": "game_started",
-                "remaining_time": self.game_state['remaining_time'],
-                "is_running": True
-            }
-            for client_id, (client_socket, addr) in list(self.clients.items()):
-                try:
-                    self.send_encrypted_message(client_socket, game_event)
-                except:
-                    pass
+                    "type": "game_event",
+                    "event": "game_started",
+                    "remaining_time": self.game_state['remaining_time'],
+                    "is_running": True
+                }
+                self.broadcast_to_all_clients(game_event)
                 return True
             return False
 
@@ -223,17 +384,16 @@ class GameServer:
             
             if was_running:
                 self.log("Game stopped")
+                self.save_game_to_database()
+                
                 stop_event = {
-                "type": "game_event",
-                "event": "game_stopped", 
-                "remaining_time": 0,
-                "is_running": False
-            }
-            for client_id, (client_socket, addr) in list(self.clients.items()):
-                try:
-                    self.send_encrypted_message(client_socket, stop_event)
-                except:
-                    pass
+                    "type": "game_event",
+                    "event": "game_stopped", 
+                    "remaining_time": 0,
+                    "is_running": False,
+                    "final_scores": self.player_scores
+                }
+                self.broadcast_to_all_clients(stop_event)
                 return True
             return False
 
@@ -259,11 +419,7 @@ class GameServer:
                     "is_running": self.game_state['is_running'],
                     "is_paused": self.game_state['is_paused']
                 }
-                for client_id, (client_socket, addr) in list(self.clients.items()):
-                    try:
-                        self.send_encrypted_message(client_socket, pause_event)
-                    except:
-                        pass
+                self.broadcast_to_all_clients(pause_event)
                 
                 return True
             else:
@@ -282,11 +438,7 @@ class GameServer:
                     "is_running": self.game_state['is_running'],
                     "is_paused": self.game_state['is_paused']
                 }
-                for client_id, (client_socket, addr) in list(self.clients.items()):
-                    try:
-                        self.send_encrypted_message(client_socket, resume_event)
-                    except:
-                        pass
+                self.broadcast_to_all_clients(resume_event)
                 
                 return True
 
@@ -309,12 +461,7 @@ class GameServer:
                                 "remaining_time": self.game_state['remaining_time'],
                                 "is_running": self.game_state['is_running']
                             }
-                            # Send to all display clients
-                            for client_id, (client_socket, addr) in list(self.clients.items()):
-                                try:
-                                    self.send_encrypted_message(client_socket, timer_update)
-                                except:
-                                    pass  # Ignore send errors
+                            self.broadcast_to_all_clients(timer_update)
             
             time.sleep(0.1)  # Small delay to prevent CPU hogging
         
@@ -383,6 +530,12 @@ class GameServer:
                         except Exception as e:
                             self.log(f"Error removing player from active list: {str(e)}", 'error')
                     
+                    # ADD THIS - Clean up game state
+                    if player_name:
+                        self.player_health.pop(player_name, None)
+                        self.player_scores.pop(player_name, None)
+                        self.player_status.pop(player_name, None)
+                    
                     # Remove from clients and player_names dictionaries
                     try:
                         del self.clients[client_id]
@@ -445,7 +598,7 @@ class GameServer:
             self.log(f"Send error: {e}", 'error')
             return False
 
-# -------------------- GUI Implementation --------------------
+# -------------------- GUI Implementation (Same as before) --------------------
 class ServerGUI(BoxLayout):
     def __init__(self, **kwargs):
         super().__init__(**kwargs)

@@ -6,6 +6,7 @@ import machine
 from machine import Pin
 from button import Button  # Import your Button class
 from IRTransmitter import IRTransmitter  # Import the IR Transmitter class
+from IRReceiver import IRReceiver  # ADD THIS - Import the IR Receiver class
 from encryptions import encrypt_message, decrypt_message
 
 # Configuration 
@@ -20,11 +21,12 @@ SERVER_PORT = 9999
 connected = False
 sock = None
 
-# Setup hardware
+# Setup hardware - UPDATED WITH IR RECEIVER
 button_pin = 16  # Pin for the button
 status_led_pin = 15  # Pin for status LED
 ir_led_pin = 14  # Pin for IR LED transmitter
 shoot_led_pin = 13  # Pin for visible LED that shows when IR is active
+ir_receiver_pin = 12  # ADD THIS - Pin for IR receiver
 
 # Define your custom class first before using it
 class CustomIRTransmitter(IRTransmitter):
@@ -171,11 +173,48 @@ def shoot():
         flash_led(1, 0.1)
         return ir_success
 
-# Initialize components
+# ADD THIS - New function to handle incoming hits
+def send_hit_to_server(shooter_id):
+    """Send a hit detection message to the server"""
+    global connected, sock
+    
+    print(f"HIT DETECTED! Shot by player ID: {shooter_id}")
+    
+    if connected and sock:
+        message = {
+            "type": "hit_detected",
+            "victim_id": PLAYER_ID,
+            "victim_name": PLAYER_NAME,
+            "shooter_id": shooter_id
+        }
+        
+        try:
+            json_message = json.dumps(message).encode('utf-8')
+            print("Sending hit message to server:", message)
+            
+            encrypted_data = encrypt_message(json_message)
+            sock.send(encrypted_data)
+            
+            # Flash status LED differently for hits (2 quick flashes)
+            flash_led(2, 0.05)
+            
+            return True
+        except Exception as e:
+            print(f"Hit send error: {e}")
+            connected = False
+            return False
+    else:
+        print("Not connected to server - hit detected locally only")
+        # Still flash LED to show hit
+        flash_led(2, 0.05)
+        return False
+
+# Initialize components - UPDATED WITH IR RECEIVER
 button = Button(button_pin, rest_state=False, internal_pulldown=True)
 status_led = Pin(status_led_pin, Pin.OUT)
 shoot_led = Pin(shoot_led_pin, Pin.OUT)  # LED to indicate shooting
 ir_transmitter = CustomIRTransmitter(ir_led_pin, shoot_led_pin)
+ir_receiver = IRReceiver(ir_receiver_pin)  # ADD THIS - Initialize IR receiver
 
 # Main execution
 print("Starting Laser Tag client...")
@@ -197,8 +236,8 @@ if not connect_to_server():
 # Flash LED to show we're ready
 flash_led(3, 0.2)
 
-# Main loop - check button and send shoot message
-print("Ready! Press the button to shoot.")
+# Main loop - check button and IR receiver - UPDATED MAIN LOOP
+print("Ready! Press the button to shoot. Listening for incoming hits...")
 
 try:
     while True:
@@ -211,6 +250,13 @@ try:
             shoot()
             # Small delay to prevent multiple triggers
             time.sleep(0.2)
+        
+        # ADD THIS - Check for incoming IR hits
+        hit_code = ir_receiver.receive_code(timeout=50)  # 50ms timeout
+        if hit_code:
+            send_hit_to_server(hit_code)
+            # Small delay to prevent multiple hit detections
+            time.sleep(0.1)
         
         # Small delay to prevent 100% CPU usage
         time.sleep(0.01)
